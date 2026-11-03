@@ -63,7 +63,8 @@ def build_attachments(sessionmaker: async_sessionmaker, stores: SessionStores, s
     options = MinerUOptions(tier=None if settings.mineru_tier == "auto" else settings.mineru_tier,
                             parse_timeout_seconds=settings.mineru_parse_timeout_seconds,
                             poll_interval_seconds=settings.mineru_poll_interval_seconds,
-                            poll_max_interval_seconds=settings.mineru_poll_interval_seconds)
+                            poll_max_interval_seconds=settings.mineru_poll_interval_seconds,
+                            request_timeout_seconds=settings.mineru_request_timeout_seconds)
     parse_job = ParseJob(service, stores, sandbox, mineru, options, settings)
     return Attachments(service=service, parse_job=parse_job, expire_job=ExpireJob(service), mineru=mineru,
                        stores=stores, sandbox=sandbox, settings=settings)
