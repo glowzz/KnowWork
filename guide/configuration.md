@@ -126,8 +126,8 @@
 
 | 配置项 | 说明 |
 |---|---|
-| `KNOWWORK_MINERU_BASE_URL` | MinerU 文档解析服务地址的默认值。更常用的做法是在「管理后台 → 模型 → 文档解析」里配，那里配了以那里为准、保存后几秒内生效，不用重启。对话附件里的 PDF、Word、PPT 在沙箱里直接提取文字，不用它；扫描件和图片要它识别文字，两边都没配时这两类附件只放原件 |
-| `KNOWWORK_MINERU_SERVER_URL` | MinerU 的 VLM 推理服务地址（sglang 或 vllm，常见 30000 端口）的默认值，界面里也能配。这是 MinerU 去访问的地址，和 MinerU 装在同一台机器时写 `http://127.0.0.1:30000`；解析模式为「自动」时，配了知识库用 hybrid 模式，不配用 pipeline 模式。界面里还能把解析模式强制成 VLM（`vlm-http-client`）、hybrid 或 pipeline，前两种必须配这个地址 |
+| `KNOWWORK_MINERU_BASE_URL` | MinerU 文档解析服务（4.1+，V1 API）地址的默认值。更常用的做法是在「管理后台 → 模型 → 文档解析」里配，那里配了以那里为准、保存后几秒内生效，不用重启。对话附件里的 PDF、Word、PPT 在沙箱里直接提取文字，不用它；扫描件和图片要它识别文字，两边都没配时这两类附件只放原件 |
+| `KNOWWORK_MINERU_TIER` | 解析档位的默认值（`auto` / `flash` / `basic` / `standard` / `advanced`，默认 `auto` 让 MinerU 自动推荐），界面里也能配。VLM 推理服务地址（sglang 或 vllm）与识别语言由 MinerU 侧部署配置，不再在这里设 |
 | `KNOWWORK_MINERU_MAX_CONCURRENCY` | MinerU 同时最多接几个解析（默认 `3`），按 MinerU 的 `max_concurrent_requests` 设；所有 worker 进程共用这个名额。界面里配了时用界面里的「同时解析上限」 |
 | `KNOWWORK_ATTACHMENT_INLINE_CHARS` | 对话附件提取出的文字不超过这么多字（默认 `20000`）就整篇放进这一轮，模型不用再读文件，一步就能回答；超过的只给字数、页数和目录，模型按需分段读 |
 | `KNOWWORK_ATTACHMENT_INLINE_TOTAL_CHARS` | 一轮所有附件整篇放进去的合计上限（默认 `40000`），前面的附件用掉了，后面的只给目录。模型的上下文小时调低 |

@@ -25,7 +25,6 @@ from .mineru import (
     MinerUOptions,
     MinerUProvider,
     ParserSettingsSource,
-    attachment_options,
 )
 from .models import ATTACHMENT_RLS_TABLES, ATTACHMENT_TABLES, Attachment
 from .parse_job import ParseJob, parse_kind
@@ -61,7 +60,11 @@ def build_attachments(sessionmaker: async_sessionmaker, stores: SessionStores, s
                             request_timeout=settings.mineru_request_timeout_seconds, transport=transport)
     service = AttachmentService(sessionmaker, stores, sandbox, settings, parse_kind(settings), expire_kind(),
                                 digest_kind(), parser_configured=mineru.configured)
-    parse_job = ParseJob(service, stores, sandbox, mineru, attachment_options(settings), settings)
+    options = MinerUOptions(tier=None if settings.mineru_tier == "auto" else settings.mineru_tier,
+                            parse_timeout_seconds=settings.mineru_parse_timeout_seconds,
+                            poll_interval_seconds=settings.mineru_poll_interval_seconds,
+                            poll_max_interval_seconds=settings.mineru_poll_interval_seconds)
+    parse_job = ParseJob(service, stores, sandbox, mineru, options, settings)
     return Attachments(service=service, parse_job=parse_job, expire_job=ExpireJob(service), mineru=mineru,
                        stores=stores, sandbox=sandbox, settings=settings)
 
