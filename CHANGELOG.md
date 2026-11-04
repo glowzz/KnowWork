@@ -12,16 +12,20 @@
   「解析档位」（自动 / 快速 flash / 基础 basic / 标准 standard / 高级 advanced）；「VLM 服务地址」与「识别语言」
   两项移除——4.1 的请求里没有这些字段了，VLM 推理服务（sglang / vllm）改在 MinerU 侧部署配置，语言自动识别。
   数据库迁移自动执行：document_parser 表的 backend 列改成 tier（旧值就近映射：pipeline→basic，VLM、hybrid→standard），
-  server_url、lang 列删掉。降级（回到旧版本）是有损的：这两列的数据回不来，映射回 VLM 模式的行因为没有了服务地址，
-  会被旧代码按「没配 VLM 服务」退回 pipeline 解析，重新保存一次配置才恢复。
+  server_url、lang 列删掉。
 - 环境变量：`KNOWWORK_MINERU_BACKEND`、`KNOWWORK_MINERU_SERVER_URL`、`KNOWWORK_MINERU_LANG` 不再读取（留着不报错），
   新增 `KNOWWORK_MINERU_TIER`（默认 `auto`）。
-- 扩展包（经 `contract.mineru` 调文档解析的）注意 Python 侧变更：`MinerUOptions` 的字段换成
-  `tier`（None 是自动推荐）+ 超时与轮询参数，`backend`、`lang`、`server_url`、`effort`、`image_analysis`
-  字段删掉；`parse_full` 保留 `layout` 参数（假的时候不把 middle_json 与图片读进内存），`image_analysis`
-  参数删掉。构造旧字段或传 `image_analysis` 会直接 TypeError，按新字段改。
 - 解析结果的取回方式变了：4.1 的结果是一个 ZIP（markdown.md、middle_json.json、images/），附件与知识库从里面取需要的部分；
   上传走回执给的上传地址（PUT），下载结果的签名地址（对象存储）不携带解析服务的令牌。会话附件只解析出 Markdown，用法不变。
+
+### 改进
+
+- 传附件后马上发消息时，附件解析多半还在后台跑：业务服务现在会等它出结果再进模型（上限
+  `KNOWWORK_ATTACHMENT_PARSE_WAIT_SECONDS`，默认 30 秒，0 是不等）。等到了文件说明直接带解析稿路径，
+  模型第一反应就是读解析好的 Markdown；超时或解析失败按原件继续，还在解析的照旧告诉模型解析稿会
+  出现在哪个路径，由模型自己决定稍后再查、先用原件还是让用户等一等——不再出现模型面对目录里
+  「来历不明」的 .md、自己用 pdftotext 又提取一遍的情况。
+- 测试连接对地址末尾多了 `/v1` 的情况给出明确提示（解析接口自己带 /v1 前缀，地址要填服务根路径）。
 
 ## [v0.0.9] - 2026-11-10
 
