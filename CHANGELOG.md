@@ -2,6 +2,40 @@
 
 每个版本要注意的事（升级步骤、不兼容的改动）都写在这里。发布流程会把对应版本这一节当作 GitHub Release 的说明。
 
+## [未发布]
+
+### 升级须知
+
+- 文档解析服务要求 MinerU 4.1 以上：4.1 改成了 V1 HTTP API（`/v1/tasks` 异步任务、`/v1/file_parse` 同步解析），
+  旧版 3.x、4.0 的接口已被 MinerU 移除，KnowWork 不再去猜旧协议，连上会提示「版本不受支持」，先把 MinerU 升到 4.1+。
+- 管理后台「模型 → 文档解析」的设置跟着 4.1 的字段改了：「解析模式」（自动 / VLM / hybrid / pipeline）换成
+  「解析档位」（自动 / 快速 flash / 基础 basic / 标准 standard / 高级 advanced）；「VLM 服务地址」与「识别语言」
+  两项移除——4.1 的请求里没有这些字段了，VLM 推理服务（sglang / vllm）改在 MinerU 侧部署配置，语言自动识别。
+  数据库迁移自动执行：document_parser 表的 backend 列改成 tier（旧值就近映射：pipeline→basic，VLM、hybrid→standard），
+  server_url、lang 列删掉。降级（回到旧版本）是有损的：这两列的数据回不来，映射回 VLM 模式的行因为没有了服务地址，
+  会被旧代码按「没配 VLM 服务」退回 pipeline 解析，重新保存一次配置才恢复。
+- 环境变量：`KNOWWORK_MINERU_BACKEND`、`KNOWWORK_MINERU_SERVER_URL`、`KNOWWORK_MINERU_LANG` 不再读取（留着不报错），
+  新增 `KNOWWORK_MINERU_TIER`（默认 `auto`）。
+- 扩展包（经 `contract.mineru` 调文档解析的）注意 Python 侧变更：`MinerUOptions` 的字段换成
+  `tier`（None 是自动推荐）+ 超时与轮询参数，`backend`、`lang`、`server_url`、`effort`、`image_analysis`
+  字段删掉；`parse_full` 保留 `layout` 参数（假的时候不把 middle_json 与图片读进内存），`image_analysis`
+  参数删掉。构造旧字段或传 `image_analysis` 会直接 TypeError，按新字段改。
+- 解析结果的取回方式变了：4.1 的结果是一个 ZIP（markdown.md、middle_json.json、images/），附件与知识库从里面取需要的部分；
+  上传走回执给的上传地址（PUT），下载结果的签名地址（对象存储）不携带解析服务的令牌。会话附件只解析出 Markdown，用法不变。
+
+### 改进
+
+- 传附件后马上发消息时，附件解析多半还在后台跑：业务服务现在会等它出结果再进模型（上限
+  `KNOWWORK_ATTACHMENT_PARSE_WAIT_SECONDS`，默认 30 秒，设 0 只跳过等待、告知仍会发）。等到了文件说明直接带
+  解析稿路径，模型第一反应就是读解析好的 Markdown。等到上限还没完的，按原件继续但会告知模型「解析仍在进行、
+  完成后出现在哪个路径」，由模型自己决定稍后再查、先用原件还是让用户等一等；解析失败的（文件问题）按原件
+  继续、不带解析提示，失败原因用户在附件上看得到——不再出现模型面对目录里「来历不明」的 .md、自己用
+  pdftotext 又提取一遍的情况。`TurnAttachment` 契约加了 `parsing` 字段
+  （parsing 时 extractedPath 是完成后的预期路径），**自建宿主的部署必须把宿主与业务服务一起升级**：
+  只升业务服务时，旧宿主会把「仍在解析」当成「已解析完成」，让模型去读一个还不存在的文件。另注意解析
+  卡住期间（如 MinerU 停机），该会话的每条消息都会等到上限才放行。
+- 测试连接对地址末尾多了 `/v1` 的情况给出明确提示（解析接口自己带 /v1 前缀，地址要填服务根路径）。
+
 ## [v0.0.4] - 2026-10-30
 
 ### 升级须知
