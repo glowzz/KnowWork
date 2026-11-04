@@ -433,7 +433,8 @@ def build_runtime(settings: Settings, *, extensions: Extensions | None = None) -
     turn_context = TurnContextHook()
     service = ConversationService(kernel, scoped, pump, feed, on_host_restart=rotator.rotate_now,
                                   refresh_model_credential=rotator.ensure_fresh, profiles=profiles,
-                                  grants=grants, attachments=TurnAttachments(attachments.service),
+                                  grants=grants, attachments=TurnAttachments(attachments.service,
+                                                                              attachments.settings),
                                   knowledge_catalog=knowledge_catalog, turn_context=turn_context,
                                   tool_credentials=tool_credentials, skill_credentials=skill_credentials,
                                   erasers=(erase_knowledge, erase_receipts,
