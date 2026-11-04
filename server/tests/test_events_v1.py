@@ -313,7 +313,7 @@ def test_attachment_handles_become_attachments_not_text(extracted):
     _, events = project(state, "session/event", session("user/message", message), seq=2)
     data = events[0]["data"]
     assert data == {"role": "user", "text": "帮我改付款条款", "attachments": [{"name": '合同 "终版".docx', "size": 2048}]}
-    assert "/workspace" not in str(events)
+    assert "/workspace" not in str(events) and "document parser" not in str(events)
 
 
 def test_mention_block_becomes_chips_not_text():
