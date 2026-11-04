@@ -40,7 +40,7 @@ class Attachments:
     mineru: MinerUProvider
     stores: SessionStores
     sandbox: SessionSandbox
-    settings: AttachmentSettings
+    settings: AttachmentSettings  # 装配处共用（例如 TurnAttachments 要等解析完成的时长）
 
     def digest_job(self, models: ChatModel) -> DigestJob:
         """导读任务要调模型，只在 worker 里建（模型客户端在那里）。"""

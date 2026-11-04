@@ -541,7 +541,8 @@ def build_runtime(settings: Settings, *, extensions: Extensions | None = None) -
     quota = QuotaPolicies()
     service = ConversationService(kernel, scoped, pump, feed, on_host_restart=host_restarted, models=host_models,
                                   refresh_model_credential=rotator.ensure_fresh, profiles=profiles,
-                                  grants=grants, attachments=TurnAttachments(attachments.service),
+                                  grants=grants, attachments=TurnAttachments(attachments.service,
+                                                                              attachments.settings),
                                   knowledge_catalog=knowledge_catalog, turn_context=turn_context, turn_state=turn_state,
                                   answer_modes=answer_modes, mention_kinds=mention_kinds, scopes=scopes,
                                   quota=quota, tool_credentials=tool_credentials, skill_credentials=skill_credentials,
