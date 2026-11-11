@@ -26,6 +26,11 @@ deploy/install.sh --timeout 600
 3. 拉镜像，失败最多重试 3 次；
 4. `docker compose up -d`，轮询 `/ready` 直到就绪，打印访问地址。
 
+`--no-pull` 不拉镜像、直接用本机已有的（本地构建或离线部署）：启动前会核对编排要用的镜像都在本机，
+缺了当场报出名字并停止。本地构建新版本时最容易漏**会话沙箱镜像**——它在 `--profile sandbox` 里，
+`docker compose config --images` 不带 profile 列不出来；漏了的话服务能正常起来，但传附件会一直报
+「沙箱镜像不可用 / 还没放进工作区」。构建后先 `docker compose config --images` 对照一遍再装。
+
 `deploy/.env` 里有凭证，权限是 600，不要提交到任何仓库。部署主密钥、宿主令牌、数据库口令由一次性容器
 `bootstrap` 生成在 Docker 卷里，不在 `.env` 里。
 

@@ -20,6 +20,13 @@ echo "$*" >> "$FAKE_LOG"
 case "$1 $2" in
   "version --format") echo "${FAKE_DOCKER_VERSION:-27.3.1}"; exit 0 ;;
 esac
+if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then
+  # 缺镜像核对：FAKE_HAVE_IMAGE 是「已存在」的空格分隔列表，没列到就算缺
+  case " ${FAKE_HAVE_IMAGE:-} " in
+    *" $3 "*) exit 0 ;;
+  esac
+  exit 1
+fi
 if [ "$1" = "compose" ]; then
   for arg in "$@"; do
     case "$arg" in
@@ -27,7 +34,13 @@ if [ "$1" = "compose" ]; then
       pull)
         n=$(cat "$FAKE_STATE" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$FAKE_STATE"
         [ "$n" -gt "${FAKE_PULL_FAILURES:-0}" ] && exit 0 || exit 1 ;;
-      config|up|ps) exit 0 ;;
+      config)
+        # 启动前的镜像核对要 config --images 列出的名字；默认带沙箱镜像（核对逻辑自己按 profile 决定取不取）
+        case " $* " in
+          *" --images "*) printf '%s\n' ${FAKE_IMAGES:-kw-server:v0.0.6 kw-runtime-host:v0.0.6 kw-sandbox:v0.0.6} ;;
+        esac
+        exit 0 ;;
+      up|ps) exit 0 ;;
     esac
   done
 fi
@@ -191,9 +204,38 @@ def test_pull_gives_up_after_three_attempts(sandbox, ready_server):
 
 
 def test_no_pull_flag(sandbox, ready_server):
-    result, calls = _run(sandbox, "--no-pull", port=ready_server)
+    result, calls = _run(sandbox, "--no-pull", port=ready_server, FAKE_HAVE_IMAGE=_all_images())
     assert result.returncode == 0
     assert " pull" not in calls
+
+
+def _all_images() -> str:
+    return "kw-server:v0.0.6 kw-runtime-host:v0.0.6 kw-sandbox:v0.0.6"
+
+
+def test_no_pull_checks_images_are_present(sandbox, ready_server):
+    """--no-pull 启动前核对镜像齐全：缺了当场报出名字并停止，别等服务起来才在运行时报沙箱不可用。"""
+    result, calls = _run(sandbox, "--no-pull", port=ready_server)
+    assert result.returncode != 0
+    assert "本机缺少以下镜像" in result.stderr
+    assert "kw-sandbox:v0.0.6" in result.stderr
+    assert "up -d" not in calls
+
+
+def test_no_pull_missing_sandbox_only_lists_that_one(sandbox, ready_server):
+    """最典型：服务器与宿主都构建了，唯独会话沙箱镜像漏了——报错要点名它，而不是笼统一句。"""
+    result, calls = _run(sandbox, "--no-pull", port=ready_server,
+                         FAKE_HAVE_IMAGE="kw-server:v0.0.6 kw-runtime-host:v0.0.6")
+    assert result.returncode != 0
+    assert "本机缺少以下镜像" in result.stderr
+    assert "kw-sandbox:v0.0.6" in result.stderr
+    assert "kw-server:v0.0.6" not in result.stderr.split("本机缺少以下镜像")[1]
+
+
+def test_ready_timeout(sandbox):
+    result, _ = _run(sandbox, "--no-pull", "--timeout", "1", port=_free_port(), FAKE_HAVE_IMAGE=_all_images())
+    assert result.returncode != 0
+    assert "仍未就绪" in result.stderr
 
 
 def test_old_docker_rejected(sandbox, ready_server):
@@ -207,12 +249,6 @@ def test_old_compose_rejected(sandbox, ready_server):
     result, _ = _run(sandbox, port=ready_server, FAKE_COMPOSE_VERSION="v2.10.0")
     assert result.returncode != 0
     assert "Compose" in result.stderr
-
-
-def test_ready_timeout(sandbox):
-    result, _ = _run(sandbox, "--no-pull", "--timeout", "1", port=_free_port())
-    assert result.returncode != 0
-    assert "仍未就绪" in result.stderr
 
 
 def test_rejects_bad_arguments(sandbox):
