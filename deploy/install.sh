@@ -157,6 +157,29 @@ pull_images() {
   done
 }
 
+# --no-pull（本地构建 / 离线部署）时启动前核对镜像都在本机：缺了当场报出名字，别等服务起来、
+# 传附件才在运行时报「沙箱镜像不可用」——那是部署少镜像（本地构建新版本时很容易漏会话沙箱），
+# 不是沙箱坏了。
+check_images() {
+  # 沙箱镜像在 sandbox profile 里，config --images 不带上，要显式加 profile
+  if sandbox_enabled; then
+    images="$(compose --profile sandbox config --images)"
+  else
+    images="$(compose config --images)"
+  fi
+  missing=""
+  for image in $images; do
+    if ! docker image inspect "$image" >/dev/null 2>&1; then
+      missing="$missing$image
+"
+    fi
+  done
+  if [ -n "$missing" ]; then
+    die "本机缺少以下镜像（--no-pull 部署要先 docker pull 或 docker load 准备好）：
+$missing"
+  fi
+}
+
 http_status() {
   if command -v curl >/dev/null 2>&1; then
     curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$1" 2>/dev/null || printf '000'
@@ -219,6 +242,7 @@ main() {
 
   compose config --quiet || die "编排配置校验失败"
   [ "$skip_pull" -eq 1 ] || pull_images
+  [ "$skip_pull" -eq 1 ] && check_images
   log "启动服务"
   compose up -d --remove-orphans
   wait_ready
