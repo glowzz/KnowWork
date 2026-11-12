@@ -1,7 +1,7 @@
 """文档解析服务的设置换成 MinerU 4.1 的解析档位
 
-Revision ID: 0040
-Revises: 0039
+Revision ID: 0051
+Revises: 0050
 Create Date: 2026-11-04 10:00:00
 
 MinerU 4.1 改成了 V1 API，请求里不再有解析模式（backend）、语言（lang）、VLM 推理服务地址（server_url）这些字段，
@@ -17,8 +17,8 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = '0046'
-down_revision: str | None = '0045'
+revision: str = '0051'
+down_revision: str | None = '0050'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
