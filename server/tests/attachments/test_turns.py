@@ -5,14 +5,12 @@
 """
 
 import asyncio
-
 from dataclasses import replace
 
 import pytest
 
 from knowwork_server.access.rls import set_workspace
 from knowwork_server.attachments import AttachmentSettings
-from knowwork_server.attachments.models import Attachment
 from knowwork_server.attachments.service import AttachmentView
 from knowwork_server.attachments.turns import TurnAttachments, turn_attachment
 from knowwork_server.conversations.service import AttachmentUnavailable
