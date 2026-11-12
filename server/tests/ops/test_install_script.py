@@ -224,8 +224,8 @@ def test_no_pull_checks_images_are_present(sandbox, ready_server):
 
 def test_no_pull_missing_sandbox_only_lists_that_one(sandbox, ready_server):
     """最典型：服务器与宿主都构建了，唯独会话沙箱镜像漏了——报错要点名它，而不是笼统一句。"""
-    result, calls = _run(sandbox, "--no-pull", port=ready_server,
-                         FAKE_HAVE_IMAGE="kw-server:v0.0.6 kw-runtime-host:v0.0.6")
+    result, _calls = _run(sandbox, "--no-pull", port=ready_server,
+                           FAKE_HAVE_IMAGE="kw-server:v0.0.6 kw-runtime-host:v0.0.6")
     assert result.returncode != 0
     assert "本机缺少以下镜像" in result.stderr
     assert "kw-sandbox:v0.0.6" in result.stderr
