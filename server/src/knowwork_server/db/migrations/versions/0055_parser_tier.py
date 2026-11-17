@@ -2,6 +2,10 @@
 
 Revision ID: 0055
 Revises: 0054
+
+本分支曾把这份变更编为 0040、后来改号 0046（上游占了号）；用那个年代镜像的库已经应用过同一份改动
+（tier 列在、backend/server_url/lang 已删），而 alembic 记下的 '0046' 在现在的编号里是上游的
+暂存附件迁移。这类库把版本拨回 0045 后正常升级，本迁移按列的存在性识别并整段跳过。
 Create Date: 2026-11-04 10:00:00
 
 MinerU 4.1 改成了 V1 API，请求里不再有解析模式（backend）、语言（lang）、VLM 推理服务地址（server_url）这些字段，
@@ -23,7 +27,16 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _tier_present(bind) -> bool:
+    """document_parser 是否已有 tier 列：老编号年代的库里它随 0040/0046 年代的迁移就位。"""
+    return bind.execute(sa.text(
+        "SELECT 1 FROM information_schema.columns "
+        "WHERE table_name = 'document_parser' AND column_name = 'tier'")).first() is not None
+
+
 def upgrade() -> None:
+    if _tier_present(op.get_bind()):
+        return
     op.add_column('document_parser', sa.Column('tier', sa.String(length=16), nullable=False, server_default='auto'))
     op.execute("""UPDATE document_parser SET tier = CASE backend
                   WHEN 'pipeline' THEN 'basic'
@@ -36,6 +49,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not _tier_present(op.get_bind()):
+        return
     op.add_column('document_parser', sa.Column('server_url', sa.String(length=500), nullable=True))
     op.add_column('document_parser', sa.Column('lang', sa.String(length=16), nullable=False, server_default='ch'))
     op.add_column('document_parser', sa.Column('backend', sa.String(length=32), nullable=False, server_default='auto'))
