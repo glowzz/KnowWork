@@ -13,6 +13,9 @@
   两项移除——4.1 的请求里没有这些字段了，VLM 推理服务（sglang / vllm）改在 MinerU 侧部署配置，语言自动识别。
   数据库迁移自动执行：document_parser 表的 backend 列改成 tier（旧值就近映射：pipeline→basic，VLM、hybrid→standard），
   server_url、lang 列删掉。
+- 从本分支老编号镜像（解析档位迁移编在 0040/0046 年代）升级的库：这份变更现在的编号是 0055，
+  升级时按 `document_parser` 是否已有 `tier` 列自动识别并整段跳过；alembic 记录还停在旧 `0046` 的，
+  先把版本拨回 `0045` 再启动新版本（0046～0054 照常补齐）。全新安装不受影响。
 - 环境变量：`KNOWWORK_MINERU_BACKEND`、`KNOWWORK_MINERU_SERVER_URL`、`KNOWWORK_MINERU_LANG` 不再读取（留着不报错），
   新增 `KNOWWORK_MINERU_TIER`（默认 `auto`）。
 - 解析结果的取回方式变了：4.1 的结果是一个 ZIP（markdown.md、middle_json.json、images/），附件与知识库从里面取需要的部分；
