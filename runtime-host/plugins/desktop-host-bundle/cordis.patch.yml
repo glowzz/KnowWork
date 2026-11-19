@@ -1,0 +1,103 @@
+# KnowWork 桌面端本机宿主的环境层，叠在官方 @deepseek-ai/dsh-base 与通用那份（@knowwork/dsh-host 的 common.patch.yml，
+# 回答方式、知识库目录、每轮上下文、会话策略、技能、工具桥等）之上。与服务端环境层（@knowwork/dsh-host-bundle）相对：
+# 那边把官方本机执行世界换成会话容器，这边原样保留——本机文件与命令、官方沙箱（macOS seatbelt / Windows ACL）、
+# 官方权限预设（三档访问方式）、官方审批与提问、官方工作目录。
+# 收件入口（@knowwork/dsh-host/device-host）只监听本机、只给桌面主进程调；合同怎么收在 intake.mjs，同一份。
+# 原则：只停用和插入，不改官方插件。
+
+# 产品停用（设备组合里才有的几项）：
+# 网页搜索不在 KnowWork 的能力里（服务端宿主也没有），连同往 DeepSeek 发东西的搜索后端一起停
+- id: web
+  disabled: true
+- id: tool-web
+  disabled: true
+- id: web-search-deepseek
+  disabled: true
+- id: web-deepseek-api
+  disabled: true
+- id: web-fetch-http
+  disabled: true
+# 技能只来自业务服务下发的本会话清单（同服务端环境层）：不读设备磁盘上的技能目录
+- id: skill-filesystem
+  disabled: true
+# 会话遥测不出设备：用量与记录都在业务服务
+- id: otel
+  disabled: true
+- id: session-telemetry-otel
+  disabled: true
+# 子 Agent 只留 spawn（fork 会把父会话历史整段带进子会话，服务端环境层同样不提供）
+- id: subagent-fork-in-process
+  disabled: true
+- id: tool-subagent-fork
+  disabled: true
+
+# 人设（同服务端环境层）：KnowWork 身份；和身份无关的通用要求写在后缀（官方 personaSuffix 的位置），
+# 换了身份也还在。语言规则不写在这里，由 knowwork-prompt-context 按业务服务下发的本轮语言写在提问之后。
+# 服务端还让通用层的运行时上下文变空（hideWorkingDirectory），设备不遮：工作文件夹对模型是有用的信息
+- id: system-prompt
+  config:
+    includeHarnessIdentity: false
+    includeRuntimeContext: false
+    personaPrefix: !!js >-
+      process.env.KNOWWORK_PERSONA ?? '你是 KnowWork 企业智能助手，帮助员工查资料、处理文档与表格、完成工作任务。'
+    personaSuffix: >-
+      调用工具前，先用一两句话告诉用户你要做什么；换个查法或重试前，说明原因和要改什么。说明要简短自然，不要提工具名、参数或内部协议。
+
+# 官方权限预设（三档访问方式）：dsh-base 原样挂了 dsh-permission-presets，这里只改表。
+# 「工作区内修改」是默认档：写限工作文件夹（会话目录）与沙箱另许的目录（additionalWritableRoots，桌面壳按
+# 环境变量给临时目录），要超出这个范围就停下来请本人批准；「仅可查看」只读——审批也配 never，越权提升一律
+# 拒绝不问，杜绝「问了就放行」破掉只读；「完全权限」不再询问，桌面端切这一档前要再确认一次（主进程的事，宿主只认预设名）。
+- id: permission
+  config:
+    presets:
+      workspace-modify:
+        sandbox: workspace-write
+        approval: ask
+      view-only:
+        sandbox: read-only
+        approval: never
+      full-access:
+        sandbox: danger-full-access
+        approval: never
+    defaultPreset: workspace-modify
+
+# 沙箱另许的写入目录（「允许的临时目录」）：桌面壳用环境变量给（冒号分隔的绝对路径），没给就是空表
+- id: sandbox-policy
+  config:
+    additionalWritableRoots: !!js (process.env.KNOWWORK_SANDBOX_EXTRA_DIRS ?? '').split(':').filter(Boolean)
+
+# 模型一律经业务服务的模型网关（同服务端环境层那一份）：provider 配置照搬，输出上限显式写死
+# （0.2.2 起没声明的模型默认 128000，请求里的 max_tokens 会超过很多模型服务自己的上限而被拒）。
+# api 形态留给环境变量（KNOWWORK_MODEL_API）：网关是 OpenAI 兼容（openai-completions）；E1 测试对准
+# 官方模拟模型服务时换 anthropic-messages（模拟服务只收 /v1/messages）
+- id: llm-pi-ai
+  config:
+    providers:
+      knowwork-gateway:
+        displayName: KnowWork 模型网关
+        api: !!js process.env.KNOWWORK_MODEL_API ?? 'openai-completions'
+        apiKeyEnv: KNOWWORK_MODEL_TOKEN
+        baseURL: !!js process.env.KNOWWORK_MODEL_BASE_URL ?? 'http://127.0.0.1:8001/internal/model/v1'
+        defaultMaxTokens: 32768
+        models:
+          - id: !!js process.env.KNOWWORK_MODEL ?? 'default'
+            name: 工作空间默认模型
+            contextWindow: !!js Number(process.env.KNOWWORK_MODEL_CONTEXT_WINDOW ?? 131072)
+            # 声明能收图片：不写时官方只按文字处理，read_image 读到的图发不出去。模型不支持图片输入的空间，
+            # 业务服务把 read_image 放进会话的 deny（官方 tools.restrict 收掉），图片根本不会产生。
+            input: [text, image]
+        retryPolicy:
+          mode: normal
+          maxRetries: 2
+
+- insert:
+    # 官方时钟：模型每走一步前在消息末尾追加当前时间（同服务端环境层，一分钟一读，定时任务按「几分钟后」算）
+    - id: time-context
+      name: '@deepseek-ai/dsh-time-context'
+      config:
+        refreshIntervalMs: 60000
+
+    # 收件入口：开会话（cwd=工作文件夹，随合同来）、每一轮、事件流、审批与提问、三档切换、令牌轮换。
+    # 只监听 127.0.0.1，缺令牌或令牌太短直接拒绝启动（同 http-host 的规矩）
+    - id: knowwork-device-host
+      name: '@knowwork/dsh-host/device-host'

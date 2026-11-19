@@ -1,0 +1,8 @@
+# dsh profile root — an empty entry list. The tree is composed as patches:
+# each bundle in package.json's dsh.profile.bundles, then cordis.patch.yml, then any
+# --patch overlays. Edit cordis.patch.yml, not this file.
+#
+# 桌面端本机宿主的配置档：官方 dsh-base（本机执行世界、权限预设、审批与提问）在前，
+# 通用层（@knowwork/dsh-host）居中，设备环境层（@knowwork/desktop-host-bundle）收尾——
+# 与服务端 profile 的分工见 common.patch.yml 头注释。
+[]

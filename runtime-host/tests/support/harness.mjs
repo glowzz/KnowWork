@@ -12,21 +12,30 @@ import { fileURLToPath } from 'node:url'
 import { startMockLlmServer } from '@deepseek-ai/dsh-llm-mock-server'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
-const PROFILE_TEMPLATE = join(ROOT, 'profile')
 const DSH_BIN = join(ROOT, 'node_modules', '.bin', 'dsh')
 const TEST_OVERLAY = join(ROOT, 'tests', 'overlays', 'test-tools.yml')
 
+/** 配置档模板与要链接的 KnowWork 捆绑包；官方 @deepseek-ai 的（如 dsh-base）由 dsh 安装自带，不用链接。 */
+const PROFILES = {
+  'knowwork-host': { template: 'profile', bundles: ['host-bundle'] },
+  'knowwork-device-host': { template: 'profile-device', bundles: ['desktop-host-bundle'] },
+}
+
 /** 每个测试一个独立的 DSH_HOME，避免会话文件互相影响。 */
-function freshDshHome() {
+function freshDshHome(profileName = 'knowwork-host') {
+  const spec = PROFILES[profileName]
+  if (spec === undefined) throw new Error(`未知的配置档：${profileName}`)
   const home = mkdtempSync(join(tmpdir(), 'kw-dsh-home-'))
-  const profile = join(home, 'profiles', 'knowwork-host')
+  const profile = join(home, 'profiles', profileName)
   mkdirSync(profile, { recursive: true })
   for (const file of ['package.json', 'cordis.yml', 'cordis.patch.yml', 'pnpm-workspace.yaml']) {
-    cpSync(join(PROFILE_TEMPLATE, file), join(profile, file))
+    cpSync(join(ROOT, spec.template, file), join(profile, file))
   }
   mkdirSync(join(profile, 'node_modules', '@knowwork'), { recursive: true })
   symlinkSync(join(ROOT, 'plugins', 'dsh-host'), join(profile, 'node_modules', '@knowwork', 'dsh-host'))
-  symlinkSync(join(ROOT, 'plugins', 'host-bundle'), join(profile, 'node_modules', '@knowwork', 'dsh-host-bundle'))
+  for (const bundle of spec.bundles) {
+    symlinkSync(join(ROOT, 'plugins', bundle), join(profile, 'node_modules', '@knowwork', bundle))
+  }
   return home
 }
 
@@ -46,10 +55,15 @@ export async function startHost(mock, env = {}, options = {}) {
     successText: mock.successText,
   })
   const token = randomBytes(24).toString('hex')
-  const home = options.home ?? freshDshHome()
+  const profileName = options.profile ?? 'knowwork-host'
+  const home = options.home ?? freshDshHome(profileName)
+  // 设备宿主的模型走配置档里的 knowwork-gateway provider（同桌面）：网关地址与令牌指向模拟模型服务，
+  // api 换成模拟服务收的 anthropic-messages（它只吃 /v1/messages）；服务端宿主用官方适配器直连模拟模型服务
+  // （测试工具配置里重新打开 llm-deepseek）。
+  const device = profileName === 'knowwork-device-host'
   // options.patches：再叠加几份测试配置（例如工作流试点），按顺序跟在测试工具配置后面
   const patches = (options.patches ?? []).flatMap(file => ['--patch', file])
-  const child = spawn(DSH_BIN, ['--profile', 'knowwork-host', '--patch', TEST_OVERLAY, ...patches], {
+  const child = spawn(DSH_BIN, ['--profile', profileName, '--patch', TEST_OVERLAY, ...patches], {
     cwd: ROOT,
     env: {
       ...process.env,
@@ -58,8 +72,9 @@ export async function startHost(mock, env = {}, options = {}) {
       DEEPSEEK_API_KEY: 'mock-key',
       KNOWWORK_HOST_TOKEN: token,
       KNOWWORK_HOST_PORT: '0',
-      KNOWWORK_MODEL_PROVIDER: 'deepseek-official',
+      KNOWWORK_MODEL_PROVIDER: device ? 'knowwork-gateway' : 'deepseek-official',
       KNOWWORK_MODEL: 'deepseek-chat',
+      ...(device ? { KNOWWORK_MODEL_BASE_URL: llm.baseURL, KNOWWORK_MODEL_API: 'anthropic-messages', KNOWWORK_MODEL_TOKEN: 'mock-gateway-token-0123456789abcdef' } : {}),
       ...env,
     },
     stdio: [options.stdin ?? 'pipe', 'pipe', 'pipe'],
@@ -71,7 +86,7 @@ export async function startHost(mock, env = {}, options = {}) {
   const port = await new Promise((resolvePort, reject) => {
     child.on('error', reject)
     let out = ''
-    const timer = setTimeout(() => reject(new Error(`宿主 60 秒内未就绪\nstdout:${out}\nstderr:${stderr}`)), 60_000)
+    const timer = setTimeout(() => reject(new Error(`宿主 60 秒内未就绪\nstdout:${out}\nstderr:${stderr}`)), options.readyTimeoutMs ?? 60_000)
     child.stdout.on('data', chunk => {
       out += chunk
       for (const line of out.split('\n')) {
@@ -82,6 +97,10 @@ export async function startHost(mock, env = {}, options = {}) {
       }
     })
     child.on('exit', code => { clearTimeout(timer); reject(new Error(`宿主退出 code=${code}\nstderr:${stderr}`)) })
+  }).catch(error => {
+    // 起不来的宿主（配置档报错后 cordis 不退出进程）要收掉，不然子进程与模拟模型服务漏到下一个用例
+    child.kill('SIGKILL')
+    return llm.close?.().then(() => { throw error }, () => { throw error })
   })
   const base = `http://127.0.0.1:${port}`
   const call = async (method, path, body) => {

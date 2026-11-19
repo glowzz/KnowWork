@@ -1,0 +1,448 @@
+/**
+ * 桌面端本机宿主的收件入口：业务服务编出的开会话与每一轮合同（intake.mjs，同一份）在这里落成会话与消息；
+ * 审批与提问的决定、三档访问方式、令牌轮换也从这里进。只给桌面主进程调：只监听本机回环地址，缺令牌或令牌太短
+ * 直接拒绝启动（同 http-host 的规矩），事件流同样为 NDJSON。
+ *
+ * 与服务端 http-host 的差异只有两处：
+ * - 会话的工作目录是员工选的工作文件夹，随开会话的合同来（cwd 字段，桌面主进程补上），不再是会话容器路径；
+ * - 多了访问方式：官方权限预设按会话查与切（dsh-base 挂的 dsh-permission-presets），桌面的三档就落在这里。
+ *
+ * Agent 的生灭经 ctx.agents 直接驱动（同 http-host）：服务端组合里没有官方会话控制器才这样；设备组合（dsh-base）
+ * 有控制器，intake.mjs 注释里的设想是归它管。M1 先走直驱——控制器的依赖是一串 web 栈件（connection、
+ * file-references、workspace），桌面没有它的客户端，等桌面壳阶段评估收益再换，接口面不变。
+ */
+
+import { createServer } from 'node:http'
+import { createRequire } from 'node:module'
+import { createHash, timingSafeEqual } from 'node:crypto'
+import { isAbsolute } from 'node:path'
+import { brandString } from '@deepseek-ai/dsh-brand'
+import { credentialRef } from '@deepseek-ai/dsh-credentials'
+import { createAnswers } from './answers.mjs'
+import { EPOCH, dropSession, framesAfter, getSession, oldestCursor, publish, publishLive } from './state.mjs'
+import { createIdleTracker, idleMsOf, releasable, sweepMsOf } from './idle-sessions.mjs'
+import { bundledCandidates } from './bundled-skills.mjs'
+import { deploymentTimeZone } from './message-source.mjs'
+import { liveFrame } from './live-frame.mjs'
+import { createModelCatalog, modelListOf } from './model-catalog.mjs'
+import { HostError as HttpError, checkSessionId, createTurnIntake, provision, requireString, sessionContractOf, toolTokenOf } from './intake.mjs'
+
+// DSH 版本号随 /health 一起报给主进程，桌面端的「关于」与系统信息显示（所有 @deepseek-ai 包锁在同一版本）
+const DSH_VERSION = createRequire(import.meta.url)('@deepseek-ai/dsh/package.json').version
+
+export const name = 'knowwork-device-host'
+export const inject = ['agents', 'permissionPresets']
+
+const HEARTBEAT_MS = 2000
+const CANCEL_SETTLE_MS = 5000
+const MAX_BODY_BYTES = 1024 * 1024
+const MAX_SUBSCRIBERS_PER_SESSION = 8
+const CREDENTIAL_ACTIONS = new Set(['tool-credential', 'skill-credential'])
+
+const digest = value => createHash('sha256').update(value).digest()
+
+function tokenMatches(expectedDigest, header) {
+  if (typeof header !== 'string' || !header.startsWith('Bearer ')) return false
+  return timingSafeEqual(digest(header.slice(7)), expectedDigest)
+}
+
+async function readJson(req) {
+  const chunks = []
+  let size = 0
+  for await (const chunk of req) {
+    size += chunk.length
+    if (size > MAX_BODY_BYTES) throw new HttpError(413, 'body_too_large', '请求体过大')
+    chunks.push(chunk)
+  }
+  if (chunks.length === 0) return {}
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } catch {
+    throw new HttpError(400, 'invalid_json', '请求体不是合法 JSON')
+  }
+}
+
+function send(res, status, body) {
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' })
+  res.end(JSON.stringify(body))
+}
+
+function sessionIdOf(raw) {
+  let id
+  try {
+    id = decodeURIComponent(raw)
+  } catch {
+    throw new HttpError(400, 'invalid_request', '路径参数编码错误')
+  }
+  return checkSessionId(id)
+}
+
+function segmentOf(raw) {
+  try {
+    return decodeURIComponent(raw)
+  } catch {
+    throw new HttpError(400, 'invalid_request', '路径参数编码错误')
+  }
+}
+
+/** 这段对话的工作文件夹：随开会话的合同来（桌面主进程补上），必须是绝对路径；恢复会话沿用原目录，不收。 */
+function cwdOf(body) {
+  const cwd = requireString(body.cwd, 'cwd')
+  if (!isAbsolute(cwd)) throw new HttpError(400, 'invalid_request', 'cwd 必须是工作文件夹的绝对路径')
+  return cwd
+}
+
+/**
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @param {{ host?: string, port?: number, token?: string, provider?: string, model?: string, modelTokenRef?: string, idleMinutes?: number }} [config]
+ */
+export function apply(ctx, config) {
+  config ??= {}
+  const log = ctx.logger
+  const token = config.token ?? process.env.KNOWWORK_HOST_TOKEN
+  if (typeof token !== 'string' || token.length < 32) {
+    throw new Error('knowwork-device-host: 需要至少 32 个字符的宿主令牌（KNOWWORK_HOST_TOKEN）')
+  }
+  const tokenDigest = digest(token)
+  const host = config.host ?? '127.0.0.1'
+  const port = config.port ?? Number(process.env.KNOWWORK_HOST_PORT ?? 0)
+  const agentOptions = {
+    provider: config.provider ?? process.env.KNOWWORK_MODEL_PROVIDER ?? 'knowwork-gateway',
+    model: config.model ?? process.env.KNOWWORK_MODEL ?? 'default',
+  }
+  const modelTokenRef = config.modelTokenRef ?? process.env.KNOWWORK_MODEL_TOKEN_REF ?? 'KNOWWORK_MODEL_TOKEN'
+  // 官方权限预设服务（dsh-base 挂的 dsh-permission-presets）：inject 注入到 ctx 上
+  const permissionPresets = ctx.permissionPresets
+  // 可选的对话模型（model-catalog.mjs）：业务服务推清单，会话按官方 agent.model.select 选
+  const models = createModelCatalog(ctx, {
+    entryId: config.modelEntry ?? process.env.KNOWWORK_MODEL_ENTRY ?? 'llm-pi-ai',
+    provider: agentOptions.provider,
+    defaultModel: agentOptions.model,
+  })
+  // 收一轮（intake.mjs）：消息没带用户时区时用设备的时区（同 http-host 的部署时区兜底）
+  const receiveTurn = createTurnIntake({ models, provider: agentOptions.provider, fallbackTimeZone: deploymentTimeZone() })
+
+  /** @type {Map<string, import('@deepseek-ai/dsh-agent').AgentHandle>} */
+  const handles = new Map()
+  /** @type {Map<string, Promise<unknown>>} */
+  const opening = new Map()
+  const closing = new Set()
+  let shuttingDown = false
+  const idleMs = idleMsOf(config.idleMinutes ?? process.env.KNOWWORK_HOST_SESSION_IDLE_MINUTES)
+  const idle = createIdleTracker(idleMs)
+
+  ctx.on('session/event', (session, event) => {
+    publish(String(session.id), 'session/event', event)
+  })
+  ctx.on('agent/status', ({ agent, status }) => {
+    const sessionId = String(agent.session.id)
+    if (handles.has(sessionId)) idle.touch(sessionId)  // 一轮跑完（变成空闲）从这一刻起算
+    publish(sessionId, 'agent/status', { status })
+  })
+  // 逐字输出：同 http-host，转正文与思考片段作为临时帧推给当前订阅方；正式消息照常落成会话事件
+  const announced = new Map()
+  ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+    const data = liveFrame(frame, announced)
+    if (data !== undefined) publishLive(String(agent.session.id), 'assistant/stream', data)
+  }, { global: true })
+
+  function liveAgent(sessionId) {
+    const handle = handles.get(sessionId)
+    if (closing.has(sessionId) || handle === undefined || ctx.agents.get(handle.agent.id) !== handle.agent) {
+      throw new HttpError(404, 'session_not_found', `会话不存在或已释放：${sessionId}`)
+    }
+    return handle.agent
+  }
+
+  async function openSession(body) {
+    if (shuttingDown) throw new HttpError(503, 'shutting_down', '宿主正在关闭')
+    const contract = sessionContractOf(body)
+    const { sessionId, resume } = contract
+    const cwd = resume ? undefined : cwdOf(body)
+    if (handles.has(sessionId) || opening.has(sessionId) || closing.has(sessionId) || getSession(sessionId) !== undefined) {
+      throw new HttpError(409, 'session_busy', `会话已打开、正在打开或正在释放：${sessionId}`)
+    }
+    const state = provision(contract)
+    const id = brandString(sessionId)
+    const task = resume
+      ? ctx.agents.resume({ resumeSessionId: id, agentOptions })
+      : ctx.agents.create({ sessionId: id, meta: { cwd }, agentOptions })
+    opening.set(sessionId, task)
+    try {
+      const handle = await task
+      handles.set(sessionId, handle)
+      state.agent = handle.agent
+      idle.touch(sessionId)
+      return { sessionId, status: handle.agent.status, epoch: EPOCH }
+    } catch (error) {
+      dropSession(state)
+      log.warn('open session %s failed: %s', sessionId, error instanceof Error ? error.stack : String(error))
+      throw new HttpError(400, 'session_open_failed', '会话打开失败，详情见宿主日志')
+    } finally {
+      opening.delete(sessionId)
+    }
+  }
+
+  function sendMessage(sessionId, body) {
+    return receiveTurn(liveAgent(sessionId), getSession(sessionId), body)
+  }
+
+  async function syncModels(body) {
+    try {
+      modelListOf(body.models)
+    } catch (error) {
+      throw new HttpError(400, 'invalid_request', error.message)
+    }
+    try {
+      return await models.sync(body.models)
+    } catch (error) {
+      log.warn('syncing models failed: %s', error instanceof Error ? error.stack : String(error))
+      throw new HttpError(503, 'models_unavailable', '模型清单没能更新，详情见宿主日志')
+    }
+  }
+
+  async function cancel(sessionId) {
+    const agent = liveAgent(sessionId)
+    agent.cancel({ kind: 'user' })
+    let timer
+    const settled = await Promise.race([
+      agent.whenIdle().then(() => true),
+      new Promise(resolve => { timer = setTimeout(() => resolve(false), CANCEL_SETTLE_MS) }),
+    ])
+    clearTimeout(timer)
+    return { settled, status: agent.status }
+  }
+
+  async function dispose(sessionId) {
+    if (closing.has(sessionId)) throw new HttpError(409, 'session_busy', `会话正在释放：${sessionId}`)
+    const handle = handles.get(sessionId)
+    if (handle === undefined) throw new HttpError(404, 'session_not_found', `会话不存在：${sessionId}`)
+    closing.add(sessionId)
+    const state = getSession(sessionId)
+    try {
+      // 先结算待决审批、结束事件流，再释放 agent；否则释放会等一个最长 30 分钟的审批。
+      if (state !== undefined) dropSession(state)
+      handles.delete(sessionId)
+      idle.forget(sessionId)
+      await handle.dispose()
+      return { disposed: true }
+    } finally {
+      closing.delete(sessionId)
+    }
+  }
+
+  function streamEvents(sessionId, url, req, res) {
+    const state = getSession(sessionId)
+    if (state === undefined || closing.has(sessionId)) throw new HttpError(404, 'session_not_found', `会话不存在：${sessionId}`)
+    const epoch = url.searchParams.get('epoch')
+    if (epoch !== null && epoch !== EPOCH) throw new HttpError(410, 'epoch_mismatch', '宿主已重启，游标失效，请从头读取')
+    if (state.subscribers.size >= MAX_SUBSCRIBERS_PER_SESSION) throw new HttpError(429, 'too_many_subscribers', '订阅过多')
+    const afterRaw = Number(url.searchParams.get('after') ?? 0)
+    const after = Number.isSafeInteger(afterRaw) && afterRaw >= 0 ? afterRaw : 0
+
+    res.writeHead(200, { 'content-type': 'application/x-ndjson; charset=utf-8', 'cache-control': 'no-store' })
+    const line = frame => res.write(`${JSON.stringify(frame)}\n`)
+    const oldest = oldestCursor(state)
+    if (after > 0 && oldest !== undefined && after < oldest - 1) {
+      line({ epoch: EPOCH, cursor: oldest - 1, kind: 'gap', time: Date.now(), data: { after, oldest } })
+    }
+    for (const frame of framesAfter(state, after)) line(frame)
+
+    let ended = false
+    const subscriber = {
+      write: frame => !ended && line(frame),
+      end: () => {
+        if (ended) return
+        ended = true
+        clearInterval(heartbeat)
+        state.subscribers.delete(subscriber)
+        res.end()
+      },
+    }
+    const heartbeat = setInterval(() => { if (!res.write('\n')) subscriber.end() }, HEARTBEAT_MS)
+    state.subscribers.add(subscriber)
+    req.on('close', () => subscriber.end())
+  }
+
+  /** 模型网关短期令牌轮换：写入官方凭据服务，下一次模型请求即使用新值。 */
+  async function rotateModelCredential(body) {
+    const credentials = ctx.get('credentials')
+    if (credentials === undefined) throw new HttpError(503, 'credentials_unavailable', '宿主没有挂载凭据服务')
+    const value = requireString(body.token, 'token')
+    if (value.length < 16 || value.length > 4096) throw new HttpError(400, 'invalid_request', 'token 长度不合法')
+    await credentials.set(credentialRef(modelTokenRef), value)
+    return { rotated: true }
+  }
+
+  /**
+   * 回调令牌续期：只对已带令牌打开的会话生效，下一次工具调用或技能加载即使用新值。
+   * @param {'toolAccess' | 'skillAccess'} slot
+   */
+  function rotateAccess(sessionId, body, slot) {
+    const state = getSession(sessionId)
+    if (state === undefined || closing.has(sessionId)) throw new HttpError(404, 'session_not_found', `会话不存在：${sessionId}`)
+    if (state[slot] === undefined) {
+      throw slot === 'toolAccess'
+        ? new HttpError(409, 'tools_not_enabled', '该会话打开时没有启用工具桥')
+        : new HttpError(409, 'skills_not_enabled', '该会话打开时没有启用技能')
+    }
+    state[slot] = { token: toolTokenOf(body.token, 'token') }
+    return { rotated: true }
+  }
+
+  /** 访问方式（官方权限预设）：按会话查与切，官方把切换记成 permission/preset 会话事件（业务服务看得到）。 */
+  function accessCatalog() {
+    return { defaultPreset: permissionPresets.defaultPreset, catalog: permissionPresets.catalog() }
+  }
+
+  function accessOf(sessionId) {
+    const agent = liveAgent(sessionId)
+    return { sessionId, preset: permissionPresets.current(agent.session) }
+  }
+
+  function setAccess(sessionId, body) {
+    const agent = liveAgent(sessionId)
+    const name = requireString(body.preset, 'preset')
+    try {
+      permissionPresets.set(agent.session, name)
+    } catch (error) {
+      throw new HttpError(400, 'invalid_preset', error instanceof Error ? error.message : String(error))
+    }
+    return accessOf(sessionId)
+  }
+
+  // 审批与提问的决定经桌面主进程交来，收法和本机宿主经主进程收的是同一份（answers.mjs）
+  const answers = createAnswers(ctx, { agentOf: liveAgent })
+
+  /**
+   * 宿主自带的技能：桌面端的技能页要列出来，业务服务自己不知道有哪些。
+   * 自带技能按会话注册（bundled-skills），这里给的是全部，停用与同名由业务服务按空间算。
+   */
+  function bundledSkills() {
+    return {
+      skills: bundledCandidates().map(skill => ({
+        name: skill.name,
+        description: skill.description,
+        userInvocable: skill.invocation.userInvocable,
+      })),
+    }
+  }
+
+  async function route(req, res) {
+    const url = new URL(req.url ?? '/', 'http://host')
+    const path = url.pathname
+    if (req.method === 'GET' && path === '/health') return send(res, 200, { ok: !shuttingDown, epoch: EPOCH, dsh: DSH_VERSION })
+    if (!tokenMatches(tokenDigest, req.headers.authorization)) throw new HttpError(401, 'unauthorized', '令牌无效')
+
+    if (req.method === 'GET' && path === '/v1/access') return send(res, 200, accessCatalog())
+    if (req.method === 'POST' && path === '/v1/sessions') return send(res, 201, await openSession(await readJson(req)))
+    if (req.method === 'PUT' && path === '/v1/model-credential') return send(res, 200, await rotateModelCredential(await readJson(req)))
+    if (req.method === 'PUT' && path === '/v1/models') return send(res, 200, await syncModels(await readJson(req)))
+    if (req.method === 'GET' && path === '/v1/skills/bundled') return send(res, 200, bundledSkills())
+
+    const match = /^\/v1\/sessions\/([^/]+)(?:\/([^/]+)(?:\/([^/]+))?)?$/.exec(path)
+    if (match === null) throw new HttpError(404, 'not_found', '路径不存在')
+    const sessionId = sessionIdOf(match[1])
+    const action = match[2]
+    const sub = match[3]
+    // 主进程定期续签令牌、查状态不算活动：否则会话永远不空闲
+    if (handles.has(sessionId) && !CREDENTIAL_ACTIONS.has(action) && !(req.method === 'GET' && action === undefined)) {
+      idle.touch(sessionId)
+    }
+
+    if (req.method === 'DELETE' && action === undefined) return send(res, 200, await dispose(sessionId))
+    if (req.method === 'GET' && action === undefined) return send(res, 200, { sessionId, status: liveAgent(sessionId).status })
+    if (req.method === 'POST' && action === 'messages') return send(res, 202, sendMessage(sessionId, await readJson(req)))
+    if (req.method === 'POST' && action === 'cancel') return send(res, 200, await cancel(sessionId))
+    if (req.method === 'PUT' && action === 'tool-credential') return send(res, 200, rotateAccess(sessionId, await readJson(req), 'toolAccess'))
+    if (req.method === 'PUT' && action === 'skill-credential') return send(res, 200, rotateAccess(sessionId, await readJson(req), 'skillAccess'))
+    if (req.method === 'GET' && action === 'events') return streamEvents(sessionId, url, req, res)
+    if (req.method === 'GET' && action === 'approvals' && sub === undefined) return send(res, 200, answers.listApprovals(sessionId))
+    if (req.method === 'POST' && action === 'approvals' && sub !== undefined) {
+      const body = await readJson(req)
+      return send(res, 200, await answers.decide(sessionId, segmentOf(sub), body?.outcome))
+    }
+    if (req.method === 'GET' && action === 'questions' && sub === undefined) return send(res, 200, answers.listQuestions(sessionId))
+    if (req.method === 'POST' && action === 'questions' && sub !== undefined) {
+      return send(res, 200, await answers.answerQuestion(sessionId, segmentOf(sub), await readJson(req)))
+    }
+    if (req.method === 'GET' && action === 'access' && sub === undefined) return send(res, 200, accessOf(sessionId))
+    if (req.method === 'POST' && action === 'access' && sub === undefined) return send(res, 200, setAccess(sessionId, await readJson(req)))
+    throw new HttpError(404, 'not_found', '路径不存在')
+  }
+
+  const server = createServer((req, res) => {
+    route(req, res).catch(error => {
+      if (!(error instanceof HttpError)) log.error('request %s %s failed: %s', req.method, req.url, error instanceof Error ? error.stack : String(error))
+      const status = error instanceof HttpError ? error.status : 500
+      const code = error instanceof HttpError ? error.code : 'internal'
+      const message = error instanceof HttpError ? error.message : '宿主内部错误'
+      if (!res.headersSent) send(res, status, { error: { code, message } })
+      else res.end()
+    })
+  })
+  server.on('error', error => {
+    log.error('http server error: %s', error instanceof Error ? error.stack : String(error))
+    process.exitCode = 1
+  })
+
+  /** 释放空闲会话：一次一个，出错只记日志（下一轮再试）。 */
+  async function sweepIdle() {
+    if (shuttingDown) return
+    const jobs = ctx.get('jobs')
+    for (const [sessionId, handle] of [...handles]) {
+      if (opening.has(sessionId) || closing.has(sessionId) || !idle.due(sessionId)) continue
+      if (!releasable(handle.agent, getSession(sessionId), jobs)) continue
+      try {
+        await dispose(sessionId)
+        log.info('session %s idle for %d min; released (reopens on the next message)', sessionId, Math.round(idleMs / 60_000))
+      } catch (error) {
+        log.warn('release idle session %s failed: %s', sessionId, error instanceof Error ? error.message : String(error))
+      }
+    }
+  }
+
+  ctx.effect(() => {
+    if (idleMs === 0) return () => {}
+    let sweeping = false
+    const timer = setInterval(() => {
+      if (sweeping) return
+      sweeping = true
+      sweepIdle().finally(() => { sweeping = false })
+    }, sweepMsOf(idleMs))
+    timer.unref?.()
+    return () => clearInterval(timer)
+  }, 'knowwork.device-host.idle-sweep')
+
+  ctx.effect(() => {
+    // 照官方就绪边界：整棵插件树（会话策略、技能门、审批应答者等监听）挂好之后才对外服务。
+    const ready = (async () => {
+      await ctx.get('loader')?.await()
+      if (shuttingDown) return
+      await new Promise(resolve => server.listen(port, host, resolve))
+      const address = server.address()
+      const bound = typeof address === 'object' && address ? address.port : port
+      process.stdout.write(`${JSON.stringify({ knowworkHostReady: true, host, port: bound, epoch: EPOCH })}\n`)
+    })().catch(error => {
+      log.error('host failed to start: %s', error instanceof Error ? error.stack : String(error))
+      process.exitCode = 1
+    })
+
+    return async () => {
+      // 照官方关闭顺序：拒新请求 → 等正在打开的会话 → 排空子 Agent → 释放 → 清状态。
+      shuttingDown = true
+      await ready
+      server.closeAllConnections?.()
+      await new Promise(resolve => server.close(() => resolve(undefined)))
+      await Promise.allSettled([...opening.values()])
+      const live = [...handles.entries()]
+      handles.clear()
+      await Promise.allSettled([ctx.get('subagents')?.drainDescendants(live.map(([, h]) => h.agent))])
+      for (const [sessionId] of live) {
+        const state = getSession(sessionId)
+        if (state !== undefined) dropSession(state)
+      }
+      await Promise.allSettled(live.map(([, handle]) => handle.dispose()))
+    }
+  }, 'knowwork.device-host')
+}
