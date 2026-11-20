@@ -5,6 +5,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { pathToFileURL } from 'node:url'
 import { mkdtempSync } from 'node:fs'
 import { readFile, readdir, rm } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -32,14 +33,15 @@ export async function convertToPdf(sourcePath, { sofficePath = 'soffice', timeou
 async function runSoffice(sourcePath, outDir, { sofficePath, timeoutMs, log }) {
   // 独立用户目录：用户自己开着 LibreOffice 也不冲突
   const profile = mkdtempSync(join(tmpdir(), 'kw-office-profile-'))
+  // -env:UserInstallation 是引导参数，放最前；路径用 pathToFileURL（Windows 的 file://C:\ 会畸形）
   const args = [
+    `-env:UserInstallation=${pathToFileURL(profile).href}`,
     '--headless', '--norestore', '--invisible', '--nolockcheck',
-    `-env:UserInstallation=file://${profile}`,
     '--convert-to', 'pdf', '--outdir', outDir, sourcePath,
   ]
   try {
     return await new Promise((resolvePromise) => {
-      const child = spawn(sofficePath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = spawn(sofficePath, args, { stdio: ['ignore', 'ignore', 'pipe'] })
       let stderr = ''
       child.stderr?.on('data', chunk => { stderr += chunk })
       const timer = setTimeout(() => {

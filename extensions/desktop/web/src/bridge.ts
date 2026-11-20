@@ -7,7 +7,7 @@
 import { ApiError } from '@knowwork/web/api/http';
 
 type Bridge = {
-  startConversation(payload: { workspaceId: string; title?: string; turn: Record<string, unknown> }): Promise<Result & { id?: string }>;
+  startConversation(payload: { workspaceId: string; folder: string; title?: string; turn: Record<string, unknown> }): Promise<Result & { id?: string }>;
   send(conversationId: string, turn: Record<string, unknown>): Promise<Result>;
   cancel(conversationId: string): Promise<Result>;
   decide(conversationId: string, approvalId: string, allow: boolean, remember: boolean): Promise<Result>;
@@ -18,7 +18,15 @@ type Bridge = {
   canContinue(conversationId: string): Promise<Result & { reason?: string | null }>;
   place(conversationId: string): Promise<Result & { device?: string | null }>;
   pickFolder(): Promise<Result & { path?: string | null }>;
+  filesRead(conversationId: string, path: string): Promise<Result & { bytes: Uint8Array }>;
+  filesPdf(conversationId: string, path: string): Promise<Result & { bytes: Uint8Array }>;
+  filesSave(conversationId: string, path: string): Promise<Result & { saved?: boolean }>;
+  filesOpen(conversationId: string, path: string, how: 'app' | 'reveal'): Promise<Result>;
+  filesReferences(conversationId: string, query: string): Promise<Result & { references?: FileReference[] }>;
+  dropFiles(files: readonly File[], conversationId: string): Promise<Result & { mentions?: string[]; skipped?: string[] }>;
 };
+
+type FileReference = { path: string; kind: 'file' | 'directory'; insert: string };
 
 export type Result = { ok: true } | { ok: false; error?: { status?: number; code?: string; message?: string } };
 

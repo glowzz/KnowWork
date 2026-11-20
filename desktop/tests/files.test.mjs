@@ -5,7 +5,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { convertToPdf, OfficeError } from '../src/main/office.mjs'
@@ -96,7 +96,7 @@ test('另存与打开：对话框与 shell 注入', async () => {
   }
 })
 
-test('@ 补全：隐藏目录跳过、带空格的路径加引号、按查找词筛', async () => {
+test('@ 补全：insert 自带 @（照官方 @file，与 web 的钉子测试同一口径）、目录不闭合续列、隐藏目录跳过', async () => {
   const { dir, fileOps } = await makeWorld()
   try {
     const all = await fileOps.references('c_1', '')
@@ -104,11 +104,41 @@ test('@ 补全：隐藏目录跳过、带空格的路径加引号、按查找词
     assert.ok(paths.includes('2025/完成率.xlsx') && paths.includes('notes.md'))
     assert.ok(!paths.some(path => path.includes('.git')), '隐藏目录不进补全')
     const quoted = all.find(reference => reference.path === '报价 单.pdf')
-    assert.equal(quoted.insert, '"报价 单.pdf"', '带空格的加引号')
-    assert.equal(all.find(reference => reference.path === '2025/完成率.xlsx').insert, '2025/完成率.xlsx')
-    assert.equal(all.find(reference => reference.path === '2025').kind, 'directory')
+    assert.equal(quoted.insert, '@"报价 单.pdf"', '带空格的加引号且自带 @')
+    assert.equal(all.find(reference => reference.path === '2025/完成率.xlsx').insert, '@2025/完成率.xlsx')
+    const directory = all.find(reference => reference.path === '2025')
+    assert.equal(directory.kind, 'directory')
+    assert.equal(directory.insert, '@2025/', '文件夹：结尾带 / 接着往下列')
     const filtered = await fileOps.references('c_1', '完成率')
     assert.ok(filtered.length > 0 && filtered.every(reference => reference.path.includes('完成率')))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('符号链接逃逸：文件夹里指向外部的链接一律拒收（读、拖入都一样）', async () => {
+  const { dir, folder, fileOps } = await makeWorld()
+  try {
+    const secret = join(dir, 'secret.md')
+    writeFileSync(secret, '机密')
+    let link
+    try {
+      link = join(folder, 'leak.md')
+      rmSync(link, { force: true })
+      symlinkSync(secret, link)
+    } catch {
+      return  // 平台不允许符号链接（Windows 无开发者模式）：本用例跳过
+    }
+    await assert.rejects(fileOps.read('c_1', 'leak.md'), /不在工作文件夹/)
+    const drag = await fileOps.mentionsForPaths('c_1', [link])
+    assert.deepEqual(drag, { mentions: [], skipped: [link] })
+    // 同前缀目录（台账 与 台账2）：词法上共享前缀也要拒
+    const sibling = folder + '2'
+    mkdirSync(sibling, { recursive: true })
+    writeFileSync(join(sibling, 'secret.txt'), '机密')
+    await assert.rejects(fileOps.read('c_1', join(sibling, 'secret.txt')), /不在工作文件夹/)
+    // 已存在的真实文件不受影响
+    assert.equal((await fileOps.read('c_1', 'notes.md')).toString(), '# 笔记')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

@@ -2,7 +2,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createFolders, resolveInFolder } from '../src/main/folders.mjs'
@@ -24,17 +24,25 @@ test('注册表：落盘、跨实例读回、删除', async () => {
   }
 })
 
-test('路径解析：相对按文件夹拼，越界不读', () => {
-  const folder = '/Users/lei/台账'
-  assert.deepEqual(resolveInFolder(folder, '2025/完成率.xlsx'),
-                   { ok: true, path: join(folder, '2025/完成率.xlsx') })
-  assert.deepEqual(resolveInFolder(folder, '/Users/lei/台账/notes.md'),
-                   { ok: true, path: '/Users/lei/台账/notes.md' })
-  const outside = resolveInFolder(folder, '/Users/lei/其他/secret.md')
-  assert.equal(outside.ok, false)
-  assert.match(outside.reason, /不在工作文件夹/)
-  const climb = resolveInFolder(folder, '../../etc/passwd')
-  assert.equal(climb.ok, false)
-  assert.deepEqual(resolveInFolder(null, 'a.txt').ok, false)
-  assert.deepEqual(resolveInFolder(folder, '  ').ok, false)
+test('路径解析：相对按文件夹拼，越界不读（返回的是磁盘上的真实路径）', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kw-resolve-'))
+  try {
+    const folder = join(dir, '台账')
+    mkdirSync(folder, { recursive: true })
+    writeFileSync(join(folder, 'notes.md'), '')
+    const resolved = await resolveInFolder(folder, '2025/完成率.xlsx')
+    assert.deepEqual(resolved, { ok: true, path: join(folder, '2025/完成率.xlsx'), base: folder })
+    const existing = await resolveInFolder(folder, 'notes.md')
+    assert.deepEqual(existing, { ok: true, path: join(folder, 'notes.md'), base: folder })
+    const outside = await resolveInFolder(folder, join(dir, '其他', 'secret.md'))
+    assert.equal(outside.ok, false)
+    assert.match(outside.reason, /不在工作文件夹/)
+    const climb = await resolveInFolder(folder, '../../etc/passwd')
+    assert.equal(climb.ok, false)
+    assert.equal((await resolveInFolder(null, 'a.txt')).ok, false)
+    assert.equal((await resolveInFolder(folder, '  ')).ok, false)
+    assert.equal((await resolveInFolder(folder, '不存在/新文件.txt')).ok, true, '新建文件也放行（还没落盘）')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

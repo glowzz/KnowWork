@@ -10,7 +10,7 @@ import { useWorkspaceStore } from '@knowwork/web/stores/workspace';
 import type { AnswerMode, QuestionAnswer } from '@knowwork/web/api/conversations';
 import type { ConversationSource } from '@knowwork/web/features/chat/sources';
 import type { InputLimits } from '@knowwork/web/features/chat/components/Composer';
-import { bridge, unwrap, bridgeAvailable, type Result } from './bridge';
+import { bridge, unwrap, bridgeAvailable } from './bridge';
 
 type FileReference = { path: string; kind: 'file' | 'directory'; insert: string };
 
@@ -160,7 +160,7 @@ export function deviceSource(): ConversationSource {
         ...(input.answerMode !== undefined ? { answer_mode: input.answerMode } : {}),
         ...(input.mentions !== undefined ? { mentions: input.mentions } : {}),
       };
-      const result = await unwrap(bridge().startConversation({ workspaceId, title: input.text.slice(0, 60), turn }));
+      const result = await unwrap(bridge().startConversation({ workspaceId, folder: workingFolder, title: input.text.slice(0, 60), turn }));
       return { id: result.id as string, firstMessage: { text: input.text, mentions: input.mentions } };
     },
     actions: {
@@ -186,11 +186,11 @@ export function deviceSource(): ConversationSource {
     files: {
       read: async (conversationId: string, path: string) => {
         const { bytes } = await unwrap(bridge().filesRead(conversationId, path));
-        return bytes as unknown as ArrayBuffer;
+        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
       },
       pdf: async (conversationId: string, path: string) => {
         const { bytes } = await unwrap(bridge().filesPdf(conversationId, path));
-        return bytes as unknown as ArrayBuffer;
+        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
       },
       save: async (conversationId: string, path: string) => {
         await unwrap(bridge().filesSave(conversationId, path));

@@ -36,6 +36,7 @@ app.setAsDefaultProtocolClient(SCHEME)
 
 let window = null
 let server = null
+let folders = null
 let runtime = null  // 登录后的运行件：{ tokens, api, relay, conversations, supervisor }
 /** 启动参数或 second-instance 带来的深链：还没准备好应用时先收住。 */
 let pendingConnect = null
@@ -127,8 +128,8 @@ async function start() {
   })
 
   // 本机对话的桥（M4/M5）：网页版的「本机」来源经 preload 调到这里；文件能力按每段对话的工作文件夹解析
-  const folders = createFolders({ file: join(app.getPath('userData'), 'conversation-folders.json'), log })
-  const fileOps = createFileOps({ folders, office: { convertToPdf }, dialog, shell, log })
+  folders = createFolders({ file: join(app.getPath('userData'), 'conversation-folders.json'), log })
+  const fileOps = createFileOps({ folders, office: { convertToPdf: (source, options = {}) => convertToPdf(source, { ...options, sofficePath: resolveSoffice() }) }, dialog, shell, log })
   const conversationCall = handler => async (_event, ...args) => {
     try {
       if (runtime === null) throw new Error('还没有登录，或宿主没有就绪')
@@ -241,11 +242,11 @@ async function enter(origin, userData, { forceLogin = false } = {}) {
   server = origin
   sendState({ kind: 'ready' })
   await window.loadURL(origin)
-  void startDeviceSide(origin, userData, tokens).catch(error => log('本机宿主启动失败：', error))
+  void startDeviceSide(origin, userData, tokens, folders).catch(error => log('本机宿主启动失败：', error))
 }
 
 /** 本机宿主与对话编排：登录成功后就在后台拉起来（起宿主要几秒，别等第一次发消息）。 */
-async function startDeviceSide(origin, userData, tokens) {
+async function startDeviceSide(origin, userData, tokens, folders) {
   const api = createBusinessApi({
     server: origin,
     accessToken: () => tokens.access().then(current => current.accessToken),
@@ -297,7 +298,7 @@ async function startDeviceSide(origin, userData, tokens) {
     return process_
   }, { log })
 
-  const conversations = createConversations({ api, host: supervisor, relay, tokens, log })
+  const conversations = createConversations({ api, host: supervisor, relay, tokens, folders, log })
 
   // 模型网关令牌按期轮换（写进官方凭据服务，下一次模型请求生效）
   const rotateModel = async () => {
@@ -356,6 +357,12 @@ function sendState(state) {
 function errorOf(error) {
   const status = typeof error?.status === 'number' ? error.status : undefined
   return { status, code: typeof error?.code === 'string' ? error.code : undefined, message: error?.message ?? '操作没有成功' }
+}
+
+function resolveSoffice() {
+  // Office 引擎：打包用 resources/office 自带的 soffice（prepare-runtime 备齐），开发机 PATH 里
+  return process.env.KNOWWORK_SOFFICE
+    ?? (app.isPackaged ? join(process.resourcesPath, 'office', 'program', 'soffice') : 'soffice')
 }
 
 function messageOf(error) {
