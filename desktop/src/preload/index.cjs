@@ -74,6 +74,6 @@ contextBridge.exposeInMainWorld('knowworkDesktop', {
         if (typeof path === 'string' && path.length > 0) paths.push(path)
       } catch { /* 拿不到路径的（比如目录虚拟项）跳过 */ }
     }
-    return invoke('knowwork:drop-files', conversationId, paths)()
+    return ipcRenderer.invoke('knowwork:drop-files', conversationId, paths)
   },
 })

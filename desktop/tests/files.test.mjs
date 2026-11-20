@@ -20,6 +20,7 @@ async function makeWorld() {
   mkdirSync(folder, { recursive: true })
   mkdirSync(join(folder, '2025'))
   writeFileSync(join(folder, '2025', '完成率.xlsx'), 'xlsx-bytes')
+  mkdirSync(join(folder, '报价 单'))
   writeFileSync(join(folder, 'notes.md'), '# 笔记')
   writeFileSync(join(folder, '报价 单.pdf'), PDF_HEAD)
   mkdirSync(join(folder, '.git'), { recursive: true })
@@ -109,6 +110,8 @@ test('@ 补全：insert 自带 @（照官方 @file，与 web 的钉子测试同�
     const directory = all.find(reference => reference.path === '2025')
     assert.equal(directory.kind, 'directory')
     assert.equal(directory.insert, '@2025/', '文件夹：结尾带 / 接着往下列')
+    const spaceDir = all.find(reference => reference.path === '报价 单')
+    assert.equal(spaceDir.insert, '@"报价 单/', '带空格文件夹：开引号不闭合 + 尾 /（对齐 web 钉子 @"资料 2026/）')
     const filtered = await fileOps.references('c_1', '完成率')
     assert.ok(filtered.length > 0 && filtered.every(reference => reference.path.includes('完成率')))
   } finally {

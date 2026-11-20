@@ -361,8 +361,11 @@ function errorOf(error) {
 
 function resolveSoffice() {
   // Office 引擎：打包用 resources/office 自带的 soffice（prepare-runtime 备齐），开发机 PATH 里
-  return process.env.KNOWWORK_SOFFICE
-    ?? (app.isPackaged ? join(process.resourcesPath, 'office', 'program', 'soffice') : 'soffice')
+  if (process.env.KNOWWORK_SOFFICE) return process.env.KNOWWORK_SOFFICE
+  if (!app.isPackaged) return 'soffice'
+  // Windows 的可执行带扩展名（spawn 不会自动补 .exe）；Mac 的 LibreOffice 布局由 CI 的 KNOWWORK_OFFICE_DIR 定
+  const executable = process.platform === 'win32' ? 'soffice.exe' : 'soffice'
+  return join(process.resourcesPath, 'office', 'program', executable)
 }
 
 function messageOf(error) {

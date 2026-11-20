@@ -144,7 +144,7 @@ export function quoteIfNeeded(relativePath) {
 /** 官方 @file 语法里的文件夹：引号不闭合、结尾带 /——网页版的补全菜单接着往下列子项。 */
 export function directoryMention(relativePath) {
   const slash = relativePath.replaceAll(sep, '/')
-  return /[\s"]/.test(slash) ? `"${slash.replaceAll('"', '\\"')}/` : `@${slash}/`
+  return /[\s"]/.test(slash) ? `@"${slash.replaceAll('"', '\\"')}/` : `@${slash}/`
 }
 
 function fileError(target, error) {
