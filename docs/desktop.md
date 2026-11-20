@@ -7,7 +7,12 @@
 > 仓库与 fork 维护的讨论结论见第 8 节。
 >
 > **落地进度**：M1 已完成（2026-11-19）——设备环境层、收件入口与 E1 测试全部落地并通过，
-> 落地时的实现决定与踩坑记录见第 9 节；文中早期的目录名 `dsh-host-device` 按仓库既有约定改成了 `desktop-host-bundle`。
+> 落地时的实现决定与踩坑记录见第 9 节；M2 已完成（2026-11-20）——扩展包落仓 `extensions/desktop/`
+> （OAuth 登记、设备路由、令牌受众、空间开关与配额），记录见第 10 节；M3 已完成（2026-11-20）——
+> 桌面壳落仓 `desktop/`（深链、系统浏览器登录、令牌入安全存储、内嵌网页版带登录态），记录见第 11 节；
+> M4 已完成（2026-11-20）——本机对话全链路（宿主托管、事件回传、审批/提问/三档经桥、系统通知、
+> 扩展前端包登记「本机」来源），记录见第 12 节。
+> 文中早期的目录名 `dsh-host-device` 按仓库既有约定改成了 `desktop-host-bundle`。
 
 ---
 
@@ -149,10 +154,9 @@ resources/     node/、python/（uv + 与 sandbox.Dockerfile 同一份钉版清�
 
 ## 6. 开源库要补的改动（都很小）
 
-1. **模型网关的对外位置**：现在 `/internal/` 在网关一律 404（`nginx.conf`），宿主走的是内网
-   `127.0.0.1:8001/internal/model/v1`。设备宿主要直连模型网关，网关加一个 `location ^~ /model-gateway/`
-   （SSE 不缓冲，令牌校验不变——`device_tokens` 的 model 受众签的就是同一种短期令牌）。
-   不加这个位置时一切照旧。
+1. ~~模型网关的对外位置~~：**不需要了**——开源侧在登记原生应用时已经把模型网关挂到公开入口
+   `/api/model/v1`（`app.py` 的 `router_from_settings(..., path_prefix=PUBLIC_PREFIX)`），走 `/api/` 现有转发，
+   令牌校验不变（model 受众的交换器也是开源自动登记的）。M2 落地时确认，见第 10.2 节。
 2. **打包脚本**：`scripts/` 里加一个交付包整理脚本（安装包 + 更新清单 → `html/desktop/<版本>/`），
    对应「解开放进部署目录，不用重启」。
 3. **Python 清单一致性测试**（新增，不改 Dockerfile）：核对桌面 resources 的 Python/Node/LibreOffice 版本
@@ -262,12 +266,70 @@ git merge upstream/main --no-ff # 跟着上游发版同步
 - **模拟模型 `repeatLast` 只重复序列末项**：要跑几轮工具调用就得显式写足几组 `['tool_call_success', 'success']`；否则后续轮次是纯文本回复，看起来像「工具没执行」。
 - **cordis 插件装配失败不会退出宿主进程**（例如缺令牌、配置错）：条目不激活、进程继续挂着。所以「缺令牌直接拒绝启动」要靠调用方的就绪超时兜底；harness 对起不来的宿主 SIGKILL 并关模拟服务，不然子进程与句柄漏进后续用例、整个测试进程退不出去。
 - **bwrap 的 `/tmp` 是沙箱内临时盘**（workspace-write 下可写但不落盘）：「工作区外」的测试落点要用 `/var/tmp`（宿主根只读，写入走提升），不能放 `/tmp`。
+- **profile 里捆绑包的软链名是包名、不是目录名**：harness 把 `plugins/host-bundle` 链成 `@knowwork/dsh-host-bundle`——链名写成目录名时整个环境层静默丢失（dsh 只警告 skip，组合缺了 HTTP 驱动就没有就绪行，表现为全部用例 60 秒就绪超时）。设备层的目录名恰好等于包名才没暴露；服务端回归测出来后已修。
 - **DSH 官方件确认**：`dsh-permission-presets`（预设表 + `ctx.permissionPresets.set/current/catalog`）、`dsh-sandbox-local`（Linux 上 bwrap→Landlock 链，本机有 bwrap 0.9.0）、`dsh-bash-sandbox`（提升字段 `sandbox_permissions`/`justification`，拒绝标记与提升提示有固定文案）、`dsh-tool-fs`（`write` 的 `file_path`/`content`，覆写要先读）。
 - **服务端回归**：harness 改动后 `e1-admission` 照跑（见本节末的验证记录）。
 
+## 10. M2 落地记录（2026-11-20）
+
+### 10.1 落了什么
+
+扩展包落仓 `extensions/desktop/`（Python 包 `knowwork_desktop`，入口组 `knowwork.extensions`，装了即启用）：
+
+| 部分 | 位置 | 内容 |
+|---|---|---|
+| 扩展对象 | `src/knowwork_desktop/extension.py` | 装配时登记 OAuth 客户端（`knowwork-desktop`，回调路径 `/oauth/desktop`）、tools/skills 两个受众的交换器、用量配额判定；挂上设备路由 |
+| 设备路由 | `src/knowwork_desktop/routes.py`（`/api/desktop`） | 建对话、开会话合同、准备一轮、收事件/逐字片段、查游标、记审批授权、对话模型清单、`/place`（别处只读的设备名提示）、DELETE（扩展收回）、管理路由 `admin/space/{workspace_id}/settings` |
+| 两张表 | `src/knowwork_desktop/tables.py` + 迁移 `desktop_0001` | `desktop_conversation`（本机会话的设备绑定）、`desktop_space`（空间开关与月度轮次上限）；分支 `desktop` 接在主线 0055 之后 |
+| 存储层 | `src/knowwork_desktop/store.py` | 绑定与开关的读写、自然月区间 |
+| 测试 | `server/tests/desktop/`（conftest 把扩展 src 加进 import 路径） | 12 个用例全过：闸门（只认桌面端登录、设备比对、属主 404）、空间开关拦建对话与准备一轮但不拦历史与事件、事件序号与子会话游标、交换受众的四道闸、管理接口权限、配额 429 说法与恢复日期、删除解绑、迁移分支幂等 |
+
+### 10.2 实现决定
+
+- **开源侧比原计划多做完了三件事**（`app.py`）：`device_tokens` 签发器（tools/skills，同一套计算、去掉服务端沙箱工具）、模型受众的交换器（登记了原生应用就自动登记）、公开回调路由（`/api/extensions/tools`、`/api/extensions/skills`）与模型网关公开入口（`/api/model/v1`，走 `/api/` 现有转发，**不需要**原计划里的 nginx 改动）。扩展只负责闸门：对话归属、设备绑定、空间开关，过了就交给开源签发器。
+- **设备绑定用设备号比对、不用 grant**：重装应用重新登录后 grant 换了、设备号不变，照样认得这台电脑；换台电脑拿着偷来的令牌则被拒。绑定表里 grant_id 只留档。
+- **两张表不开行级安全**（同 `oauth_grant` 这类全局身份/配置表）：绑定查找发生在知道空间之前（按 conversation_id 找行），RLS 按 `current_setting('app.workspace_id')` 放行反而查不到；属主在代码里判，`Extension.rls_tables = ()`。
+- **配额是空间级的月度轮次上限**（`desktop_space.monthly_turn_limit`，NULL 不限）：计数用业务服务的用量记录（`ApiContext.usage.turns`），各端一起算；登记经开源的配额口子（`quota.set`，只有一个名额），429 的 `detail()` 照 `QuotaExceeded.detail()` 的 code。
+- **镜像接线留给 M6**：现在的镜像构建不装这个包（部署里还没有桌面端），装法写在 `extensions/desktop/README.md`（`uv pip install --no-deps`）。装上之后授权端点、公开回调路由即生效——所以和桌面应用一个版本走。
+- **前端包**（`chat.sources` 登记、设置页、管理页）属 M3/M4，随桌面壳一起；`/place` 的数据端已就位。
+
+### 10.3 踩坑与机制备忘
+
+- **pgserver 的测试库跨用例不重建**（`create_all` 幂等但数据留着）：上一个用例关掉的空间开关会让后面所有 `a_conversation` 403。每个用例建独立空间（`world.ws`）。
+- **`in_workspace` 是同步上下文管理器**（设 ContextVar，包住 async 查询没问题），不是 `async with`。
+- **仓库的 API 惯例**：请求体 snake_case（同 `SendMessage`/`AuthorizeBody`），响应 camelCase（同设备视图 `_device_view`）。
+- **准备一轮的错误映射直接用开源的 `TURN_REJECTIONS` + `turn_rejected`**（conversations/api.py）——注释明说扩展路由用同一套，QuotaExceeded 也在里面映射成 429。
+- **测试里搭真实服务栈很便宜**：`ConversationService(FakeKernel(), sessionmaker, pump, feed)` + `DeviceConversations`，不碰宿主、不碰沙箱；`prepare_on_device` 不做任何内核调用，正好测路由闸门。
+
 ---
 
-## 附录 A：需求原文（上游公众号文章的桌面端部分）
+## 11. M3 落地记录（2026-11-20）
+
+### 11.1 落了什么
+
+桌面壳落仓 `desktop/`（Electron，纯逻辑 .mjs 零构建、零运行时依赖——同 runtime-host 的路子；Electron 胶水隔离在 `index.mjs` 与 `preload`）：
+
+| 部分 | 位置 | 内容 |
+|---|---|---|
+| 纯逻辑 | `src/main/auth/`（pkce、loopback、client、login）、`config.mjs`、`deeplink.mjs`、`tokens.mjs` | PKCE、回环监听收授权码（RFC 8252 7.3）、三种 grant（授权码/刷新/RFC 8693）、登录编排、服务地址与设备身份持久化、令牌存取与快过期自动刷新 |
+| Electron 胶水 | `src/main/index.mjs`、`secure-store.mjs`、`src/preload/index.cjs`、`resources/connect.html` | 单实例与深链（`knowwork://connect`，mac open-url / win second-instance）、连接页（深链预填或手工输入）、safeStorage 加密令牌文件、网页会话 Cookie 注入、加载服务端网页版；导航守卫（站内新窗口交系统浏览器、越界导航拒绝）、权限全拒 |
+| 打包 | `electron-builder.yml` | Mac（arm64 dmg/zip）+ Windows（x64 nsis/zip），未签名；`protocols` 注册 knowwork 深链。M6 接交付 |
+| 测试 | `tests/`（node:test） | 20 个用例全过：PKCE 合规、深链各种形态、回环收码/拒/state 串线/超时/关停、登录编排对 stub 授权服务全流程（PKCE 校验器被端点核对、拒绝路径）、令牌刷新与吊销清空、按受众换、加密存储往返与明文回退、配置与设备身份往返 |
+
+### 11.2 实现决定
+
+- **登录态怎么到内嵌网页版**（M3 的核心问题）：网页版吃 Cookie 会话（`kw_session`），开源没有 token→session 的交接。做法是扩展新增 `desktop-session` 换令牌受众——原生登录换一张网页会话令牌（`SessionService.create(method='desktop')`，时长照 `IdentityConfig` 默认），壳拿它设成服务地址上的 Cookie。系统浏览器批一次授权，壳里的网页版就是登录着的；重启时刷新令牌静默续期。**开源文件零改动**，全部走 M2 的扩展合同。
+- **两份身份、一个账号**：主进程的原生 OAuth 身份（设备绑定、换受众令牌）与壳内网页版的 Cookie 会话（网页版自己的登录态）都指向同一个人；前者是设备对话的凭据来源，后者保证界面与云端完全同一套。
+- **桌面壳选 Electron**（按方案第 3.2 节的理由）：DSH 宿主是 Node 生态、自带 Node 与自动更新、官方桌面同构；壳内直接加载服务端网页版（`window.knowworkShell.origin` 桥已预留），对话页零新建。
+- **深链的宽容度**：Windows 会在 URL 后补斜杠、协议大小写不定；服务地址带路径时归一到源（对手工粘贴宽容）。
+- **回环监听拒绝的竞态**：`done` 的拒绝可能早于编排 `await`（用户当场点拒绝、超时）——创建时就挂兜底 catch，否则 Node 把「暂无人处理的拒绝」当未捕获异常退进程（调试实录见测试）。
+- **测试里的「浏览器」**：登录编排的浏览器一步是注入的（壳里 `shell.openExternal`），测试用抓地址的 fetch 顺着 302 打到回环监听——整条 RFC 8252 流程无显示环境即可验证。
+
+### 11.3 环境备忘
+
+- Electron 二进制下载（~110MB）在受限网络可能解压失败（dist 只剩 `locales`）：缓存在 `~/.cache/electron/`，手动解压到 `node_modules/electron/dist/` 并写 `path.txt`（内容 `electron`），见 `desktop/README.md`。
+- 无显示环境跑不了壳本体；`ELECTRON_RUN_AS_NODE=1 node_modules/electron/dist/electron --test tests/*.test.mjs` 可以用 Electron 自带的 Node 跑全套测试（20/20 验证过，自带 Node 22.21.1）。壳本体的验收在开发机上做：`npm start` → 深链或填地址 → 浏览器批准 → 壳内网页版已登录；重启免登。
+- 运行时宿主要求 Node 24.9+（`runtime-host` 的 engines），桌面打包自带独立 Node 时按这个版本带（M4 接入）。
 
 桌面端，对话在员工自己的电脑上执行。服务端版本里，智能体运行的命令和读写的文件，一律落在这段对话自己的沙箱容器里。
 服务器是多人共用的，上面有数据库连接、密钥和别人的数据，附件和知识库里夹带的提示词不能碰到它。可是不少工作的材料

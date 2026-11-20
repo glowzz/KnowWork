@@ -15,10 +15,10 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const DSH_BIN = join(ROOT, 'node_modules', '.bin', 'dsh')
 const TEST_OVERLAY = join(ROOT, 'tests', 'overlays', 'test-tools.yml')
 
-/** 配置档模板与要链接的 KnowWork 捆绑包；官方 @deepseek-ai 的（如 dsh-base）由 dsh 安装自带，不用链接。 */
+/** 配置档模板与要链接的 KnowWork 捆绑包（[目录名, 包名]）；官方 @deepseek-ai 的（如 dsh-base）由 dsh 安装自带，不用链接。 */
 const PROFILES = {
-  'knowwork-host': { template: 'profile', bundles: ['host-bundle'] },
-  'knowwork-device-host': { template: 'profile-device', bundles: ['desktop-host-bundle'] },
+  'knowwork-host': { template: 'profile', bundles: [['host-bundle', 'dsh-host-bundle']] },
+  'knowwork-device-host': { template: 'profile-device', bundles: [['desktop-host-bundle', 'desktop-host-bundle']] },
 }
 
 /** 每个测试一个独立的 DSH_HOME，避免会话文件互相影响。 */
@@ -33,8 +33,8 @@ function freshDshHome(profileName = 'knowwork-host') {
   }
   mkdirSync(join(profile, 'node_modules', '@knowwork'), { recursive: true })
   symlinkSync(join(ROOT, 'plugins', 'dsh-host'), join(profile, 'node_modules', '@knowwork', 'dsh-host'))
-  for (const bundle of spec.bundles) {
-    symlinkSync(join(ROOT, 'plugins', bundle), join(profile, 'node_modules', '@knowwork', bundle))
+  for (const [dir, name] of spec.bundles) {
+    symlinkSync(join(ROOT, 'plugins', dir), join(profile, 'node_modules', '@knowwork', name))
   }
   return home
 }
