@@ -5,7 +5,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { convertToPdf, OfficeError } from '../src/main/office.mjs'
@@ -23,6 +23,7 @@ async function makeWorld() {
   mkdirSync(join(folder, '报价 单'))
   writeFileSync(join(folder, 'notes.md'), '# 笔记')
   writeFileSync(join(folder, '报价 单.pdf'), PDF_HEAD)
+  writeFileSync(join(folder, '三季度 报告.docx'), 'docx')
   mkdirSync(join(folder, '.git'), { recursive: true })
   writeFileSync(join(folder, '.git', 'hidden'), 'h')
   const folders = createFolders({ file: join(dir, 'folders.json') })
@@ -59,7 +60,7 @@ test('转 PDF：pdf 原件直接回，别的走转换引擎', async () => {
     assert.equal(office.calls.length, 0, 'PDF 不用再转')
     const converted = await fileOps.pdf('c_1', 'notes.md')
     assert.equal(converted.toString(), PDF_HEAD)
-    assert.deepEqual(office.calls, [join(dir, '工作 文件夹', 'notes.md')])
+    assert.deepEqual(office.calls, [realpathSync(join(dir, '工作 文件夹', 'notes.md'))])
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -98,15 +99,19 @@ test('另存与打开：对话框与 shell 注入', async () => {
 })
 
 test('@ 补全：insert 自带 @（照官方 @file，与 web 的钉子测试同一口径）、目录不闭合续列、隐藏目录跳过', async () => {
-  const { dir, fileOps } = await makeWorld()
+  const { dir, folder, fileOps } = await makeWorld()
   try {
     const all = await fileOps.references('c_1', '')
     const paths = all.map(reference => reference.path)
     assert.ok(paths.includes('2025/完成率.xlsx') && paths.includes('notes.md'))
     assert.ok(!paths.some(path => path.includes('.git')), '隐藏目录不进补全')
     const quoted = all.find(reference => reference.path === '报价 单.pdf')
-    assert.equal(quoted.insert, '@"报价 单.pdf"', '带空格的加引号且自带 @')
+    assert.equal(quoted.insert, '@"报价 单.pdf"', '带空格的加引号（闭口）且自带 @')
     assert.equal(all.find(reference => reference.path === '2025/完成率.xlsx').insert, '@2025/完成率.xlsx')
+    // 含引号的文件名：无空格照 @原样 列（官方 fileMention 口径）
+    writeFileSync(join(folder, '合同"终版.docx'), 'x')
+    const withQuote = await fileOps.references('c_1', '')
+    assert.equal(withQuote.find(reference => reference.path === '合同"终版.docx')?.insert, '@合同"终版.docx')
     const directory = all.find(reference => reference.path === '2025')
     assert.equal(directory.kind, 'directory')
     assert.equal(directory.insert, '@2025/', '文件夹：结尾带 / 接着往下列')
@@ -148,15 +153,20 @@ test('符号链接逃逸：文件夹里指向外部的链接一律拒收（读�
 })
 
 test('拖入转 @ 路径：文件夹外的跳过不外带', async () => {
-  const { dir, fileOps } = await makeWorld()
+  const { dir, folder, fileOps } = await makeWorld()
   try {
+    const quoteName = join(folder, '三季度 "终版".docx')
+    writeFileSync(quoteName, 'x')
     const result = await fileOps.mentionsForPaths('c_1', [
       join(dir, '工作 文件夹', 'notes.md'),
       join(dir, '工作 文件夹', '2025', '完成率.xlsx'),
+      join(dir, '工作 文件夹', '三季度 报告.docx'),
+      quoteName,
       '/etc/passwd',
     ])
-    assert.deepEqual(result.mentions, ['@notes.md', '@2025/完成率.xlsx'])
-    assert.deepEqual(result.skipped, ['/etc/passwd'])
+    assert.deepEqual(result.mentions, ['@notes.md', '@2025/完成率.xlsx', '@"三季度 报告.docx"'],
+      '无空格 @原样、有空格 @引号闭合；官方口径')
+    assert.deepEqual(result.skipped, [quoteName, '/etc/passwd'], '含引号与文件夹外的不生成 @')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

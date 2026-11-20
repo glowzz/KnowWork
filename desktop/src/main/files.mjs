@@ -82,11 +82,10 @@ export function createFileOps({ folders, office, dialog = null, shell = null, lo
         if (found.length >= MATCH_LIMIT) return
         const relativePath = relative(root.base, entry.path).replaceAll(sep, '/')
         if (tokens.length > 0 && !tokens.every(token => relativePath.toLowerCase().includes(token))) return
-        found.push({
-          path: relativePath,
-          kind: entry.kind,
-          insert: entry.kind === 'directory' ? directoryMention(relativePath) : `@${quoteIfNeeded(relativePath)}`,
-        })
+        // 含引号的路径不进补全（官方 fileMention 对它不生成 @，@ 菜单的正则也解析不了）
+        const insert = entry.kind === 'directory' ? directoryMention(relativePath) : fileMention(relativePath)
+        if (insert === null) return
+        found.push({ path: relativePath, kind: entry.kind, insert })
       })
       return found
     },
@@ -107,7 +106,15 @@ export function createFileOps({ folders, office, dialog = null, shell = null, lo
           skipped.push(raw)
           continue
         }
-        mentions.push(`@${quoteIfNeeded(relativePath)}`)
+        // 官方 fileMention 的口径：含引号的路径退回原样文字（不是合法 @）——进 skipped
+        const mention = relativePath.includes('"')
+          ? null
+          : /\s/.test(relativePath) ? `@"${relativePath}"` : `@${relativePath}`
+        if (mention === null) {
+          skipped.push(raw)
+          continue
+        }
+        mentions.push(mention)
       }
       return { mentions, skipped }
     },
@@ -136,15 +143,17 @@ async function walk(current, root, depth, state, visit) {
   }
 }
 
-/** 官方 @file 语法：文件是完整引用（带空格或引号的加引号，内层引号转义）。 */
-export function quoteIfNeeded(relativePath) {
-  return /[\s"]/.test(relativePath) ? `"${relativePath.replaceAll('"', '\\"')}"` : relativePath
+/** 官方 fileMention（editRequest.ts）的口径：无空格 @原样；有空格 @"引号闭合"；含引号不生成 @（null）。 */
+export function fileMention(relativePath) {
+  if (!/\s/.test(relativePath)) return `@${relativePath}`
+  return relativePath.includes('"') ? null : `@"${relativePath}"`
 }
 
-/** 官方 @file 语法里的文件夹：引号不闭合、结尾带 /——网页版的补全菜单接着往下列子项。 */
+/** 官方 @file 语法里的文件夹（补全列表）：引号不闭合、结尾带 /——网页版的补全菜单接着往下列子项。
+ * 含引号的路径解析不了，返回 null。 */
 export function directoryMention(relativePath) {
-  const slash = relativePath.replaceAll(sep, '/')
-  return /[\s"]/.test(slash) ? `@"${slash.replaceAll('"', '\\"')}/` : `@${slash}/`
+  if (relativePath.includes('"')) return null
+  return /\s/.test(relativePath) ? `@"${relativePath}/` : `@${relativePath}/`
 }
 
 function fileError(target, error) {

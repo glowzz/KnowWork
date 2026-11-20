@@ -2,7 +2,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createFolders, resolveInFolder } from '../src/main/folders.mjs'
@@ -30,10 +30,12 @@ test('路径解析：相对按文件夹拼，越界不读（返回的是磁盘�
     const folder = join(dir, '台账')
     mkdirSync(folder, { recursive: true })
     writeFileSync(join(folder, 'notes.md'), '')
+    // macOS 的 tmpdir（/var/…）realpath 后是 /private/var/…：期望值按磁盘真实路径算
+    const realFolder = realpathSync(folder)
     const resolved = await resolveInFolder(folder, '2025/完成率.xlsx')
-    assert.deepEqual(resolved, { ok: true, path: join(folder, '2025/完成率.xlsx'), base: folder })
+    assert.deepEqual(resolved, { ok: true, path: join(realFolder, '2025/完成率.xlsx'), base: realFolder })
     const existing = await resolveInFolder(folder, 'notes.md')
-    assert.deepEqual(existing, { ok: true, path: join(folder, 'notes.md'), base: folder })
+    assert.deepEqual(existing, { ok: true, path: join(realFolder, 'notes.md'), base: realFolder })
     const outside = await resolveInFolder(folder, join(dir, '其他', 'secret.md'))
     assert.equal(outside.ok, false)
     assert.match(outside.reason, /不在工作文件夹/)
