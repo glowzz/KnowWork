@@ -59,7 +59,8 @@ export function createFileOps({ folders, office, dialog = null, shell = null, lo
       try {
         await copyFile(target, result.filePath)
       } catch (error) {
-        throw new FileNotFoundError(`另存失败：${error?.message ?? '未知原因'}`)
+        // 原始报错带本机绝对路径，不进界面
+        throw new FileNotFoundError(`另存失败：无法写入 ${basename(result.filePath)}`)
       }
       return { saved: true, savedTo: result.filePath }
     },
@@ -92,7 +93,7 @@ export function createFileOps({ folders, office, dialog = null, shell = null, lo
         if (found.length >= MATCH_LIMIT) return
         const relativePath = relative(root.base, entry.path).replaceAll(sep, '/')
         if (tokens.length > 0 && !tokens.every(token => relativePath.toLowerCase().includes(token))) return
-        // 含引号的路径不进补全（官方 fileMention 对它不生成 @，@ 菜单的正则也解析不了）
+        // 含引号且带空格的路径生成不了合法 @（官方 fileMention 口径），不进补全
         const insert = entry.kind === 'directory' ? directoryMention(relativePath) : fileMention(relativePath)
         if (insert === null) return
         found.push({ path: relativePath, kind: entry.kind, insert })
@@ -165,6 +166,10 @@ export function directoryMention(relativePath) {
 }
 
 function fileError(target, error) {
-  if (error?.code === 'ENOENT') return new FileNotFoundError(`文件不在了：${basename(target)}`)
-  return new FileNotFoundError(`文件读不了：${error?.message ?? '未知原因'}`)
+  // 只给 basename 与固定文案：原始报错里的本机绝对路径不进界面
+  const name = basename(target)
+  if (error?.code === 'ENOENT') return new FileNotFoundError(`文件不在了：${name}`)
+  if (error?.code === 'EACCES' || error?.code === 'EPERM') return new FileNotFoundError(`没有权限读这个文件：${name}`)
+  if (error?.code === 'EISDIR') return new FileNotFoundError(`这是一个文件夹，不是文件：${name}`)
+  return new FileNotFoundError(`文件读不了：${name}`)
 }

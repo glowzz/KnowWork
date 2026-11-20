@@ -112,7 +112,7 @@ function stageOffice() {
   // （运行时 resolveSoffice 找 office/Contents/MacOS/soffice）；Windows/Linux 的 program/soffice 原样拷
   const appContents = join(officeDir, 'LibreOffice.app', 'Contents')
   if (platform === 'darwin' && existsSync(appContents)) {
-    cpSync(appContents, target, { recursive: true })
+    cpSync(appContents, join(target, 'Contents'), { recursive: true })
   } else {
     cpSync(officeDir, target, { recursive: true })
   }

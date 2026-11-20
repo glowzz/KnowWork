@@ -10,7 +10,8 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
+import { stat } from 'node:fs/promises'
 import { BrowserWindow, app, dialog, ipcMain, Notification, safeStorage, shell } from 'electron'
 import { createBusinessApi } from './api.mjs'
 import * as oauthClient from './auth/client.mjs'
@@ -139,6 +140,17 @@ async function start() {
     }
   }
   ipcMain.handle('knowwork:start-conversation', conversationCall(async payload => {
+    // 工作文件夹是文件能力的安全边界根：主进程自己校验（绝对路径 + 存在且是目录），不信任渲染进程的任意字符串
+    if (typeof payload.folder !== 'string' || !isAbsolute(payload.folder)) {
+      return { ok: false, error: { message: '工作文件夹要用绝对路径' } }
+    }
+    try {
+      if (!(await stat(payload.folder)).isDirectory()) {
+        return { ok: false, error: { message: '工作文件夹不是一个目录' } }
+      }
+    } catch {
+      return { ok: false, error: { message: '工作文件夹不存在' } }
+    }
     const conversation = await runtime.api.createConversation(payload.workspaceId, payload.title ?? '')
     await folders.set(conversation.id, payload.folder)
     await runtime.conversations.send(conversation.id, payload.turn)
