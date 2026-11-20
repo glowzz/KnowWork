@@ -147,6 +147,19 @@ test('符号链接逃逸：文件夹里指向外部的链接一律拒收（读�
     await assert.rejects(fileOps.read('c_1', join(sibling, 'secret.txt')), /不在工作文件夹/)
     // 已存在的真实文件不受影响
     assert.equal((await fileOps.read('c_1', 'notes.md')).toString(), '# 笔记')
+    // 登记的文件夹路径带符号链接段（macOS 的 /var → /private/var 常见）：拖入的 OS 真实路径也算在内
+    const linkDir = join(dir, 'folder-link')
+    try {
+      symlinkSync(folder, linkDir)
+    } catch {
+      return  // 平台不允许符号链接：上面的链接用例已经验过，这里直接结束
+    }
+    const linkedFolders = createFolders({ file: join(dir, 'folders-link.json') })
+    await linkedFolders.set('c_1', linkDir)
+    const fileOpsLinked = createFileOps({ folders: linkedFolders, office: fileOps.office })
+    const dragReal = await fileOpsLinked.mentionsForPaths('c_1', [join(folder, 'notes.md')])
+    assert.deepEqual(dragReal.mentions, ['@notes.md'], '登记带链接段时，OS 真实路径的拖入也算文件夹内')
+    await assert.rejects(fileOpsLinked.read('c_1', join(dir, 'secret.md')), /不在工作文件夹/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
@@ -157,16 +170,19 @@ test('拖入转 @ 路径：文件夹外的跳过不外带', async () => {
   try {
     const quoteName = join(folder, '三季度 "终版".docx')
     writeFileSync(quoteName, 'x')
+    const quoteNoSpace = join(folder, '合同"终版.docx')
+    writeFileSync(quoteNoSpace, 'x')
     const result = await fileOps.mentionsForPaths('c_1', [
       join(dir, '工作 文件夹', 'notes.md'),
       join(dir, '工作 文件夹', '2025', '完成率.xlsx'),
       join(dir, '工作 文件夹', '三季度 报告.docx'),
+      quoteNoSpace,
       quoteName,
       '/etc/passwd',
     ])
-    assert.deepEqual(result.mentions, ['@notes.md', '@2025/完成率.xlsx', '@"三季度 报告.docx"'],
-      '无空格 @原样、有空格 @引号闭合；官方口径')
-    assert.deepEqual(result.skipped, [quoteName, '/etc/passwd'], '含引号与文件夹外的不生成 @')
+    assert.deepEqual(result.mentions, ['@notes.md', '@2025/完成率.xlsx', '@"三季度 报告.docx"', '@合同"终版.docx'],
+      '无空格 @原样（含引号）、有空格 @引号闭合；官方口径')
+    assert.deepEqual(result.skipped, [quoteName, '/etc/passwd'], '引号+空格与文件夹外的不生成 @')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

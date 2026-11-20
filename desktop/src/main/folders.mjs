@@ -59,11 +59,9 @@ export async function resolveInFolder(folder, rawPath) {
     return { ok: false, reason: '这段对话没有工作文件夹' }
   }
   const base = resolve(folder)
+  // target：绝对输入原样（可能是 OS 真实路径——登记的文件夹本身带符号链接段时，两者词法形态不同），
+  // 相对输入按登记的文件夹拼；真实核对统一在 realpath 之后做，两种形态都认可
   const target = isAbsolute(rawPath) ? resolve(rawPath) : resolve(join(base, rawPath))
-  const baseWithSep = base.endsWith(sep) ? base : base + sep
-  if (target !== base && !target.startsWith(baseWithSep)) {
-    return { ok: false, reason: '这个路径不在工作文件夹里' }
-  }
   let realBase
   try {
     realBase = await realpath(base)

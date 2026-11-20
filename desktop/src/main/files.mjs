@@ -37,7 +37,13 @@ export function createFileOps({ folders, office, dialog = null, shell = null, lo
     /** Word、PPT 等转成 PDF 的字节（给网页版的 PDF 阅读器）；PDF 原件直接回。 */
     async pdf(conversationId, path) {
       const { path: target } = await resolveTarget(conversationId, path)
-      if (target.toLowerCase().endsWith('.pdf')) return readFile(target)
+      if (target.toLowerCase().endsWith('.pdf')) {
+        try {
+          return await readFile(target)
+        } catch (error) {
+          throw fileError(target, error)
+        }
+      }
       return office.convertToPdf(target, { log })
     },
 
@@ -50,7 +56,11 @@ export function createFileOps({ folders, office, dialog = null, shell = null, lo
         properties: ['createDirectory', 'showOverwriteConfirmation'],
       })
       if (result.canceled || result.filePath === undefined) return { saved: false }
-      await copyFile(target, result.filePath)
+      try {
+        await copyFile(target, result.filePath)
+      } catch (error) {
+        throw new FileNotFoundError(`另存失败：${error?.message ?? '未知原因'}`)
+      }
       return { saved: true, savedTo: result.filePath }
     },
 
@@ -106,10 +116,8 @@ export function createFileOps({ folders, office, dialog = null, shell = null, lo
           skipped.push(raw)
           continue
         }
-        // 官方 fileMention 的口径：含引号的路径退回原样文字（不是合法 @）——进 skipped
-        const mention = relativePath.includes('"')
-          ? null
-          : /\s/.test(relativePath) ? `@"${relativePath}"` : `@${relativePath}`
+        // 与 references 的补全同一套口径（官方 fileMention）：含引号 + 空格的生成不了合法 @——进 skipped
+        const mention = fileMention(relativePath)
         if (mention === null) {
           skipped.push(raw)
           continue

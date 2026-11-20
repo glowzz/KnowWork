@@ -108,7 +108,14 @@ function stageOffice() {
     return
   }
   rmSync(target, { recursive: true, force: true })
-  cpSync(officeDir, target, { recursive: true })
+  // mac 的免安装形态是 LibreOffice.app：把 Contents 归一到 resources/office/Contents
+  // （运行时 resolveSoffice 找 office/Contents/MacOS/soffice）；Windows/Linux 的 program/soffice 原样拷
+  const appContents = join(officeDir, 'LibreOffice.app', 'Contents')
+  if (platform === 'darwin' && existsSync(appContents)) {
+    cpSync(appContents, target, { recursive: true })
+  } else {
+    cpSync(officeDir, target, { recursive: true })
+  }
   log('LibreOffice 就位：', target)
 }
 
