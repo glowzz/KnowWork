@@ -30,7 +30,7 @@ ARG KNOWWORK_BUILD_DESKTOP=""
 COPY extensions /extensions
 RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "$KNOWWORK_BUILD_DESKTOP" = "1" ]; then \
-      uv pip install --no-deps /extensions/desktop; \
+      uv pip install --python /opt/venv/bin/python --no-deps /extensions/desktop; \
     fi \
  && rm -rf /extensions
 

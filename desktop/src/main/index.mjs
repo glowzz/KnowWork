@@ -13,6 +13,7 @@ import { randomBytes } from 'node:crypto'
 import { isAbsolute, join } from 'node:path'
 import { stat } from 'node:fs/promises'
 import { BrowserWindow, app, dialog, ipcMain, Notification, safeStorage, shell } from 'electron'
+import { autoUpdater } from 'electron-updater'
 import { createBusinessApi } from './api.mjs'
 import * as oauthClient from './auth/client.mjs'
 import { browserLogin } from './auth/login.mjs'
@@ -127,6 +128,21 @@ async function start() {
     })
     return true
   })
+  // 更新的两个 IPC 也按 {ok} 形状答（前端/调试才拿得到失败原因）
+  ipcMain.handle('knowwork:download-update', async () => {
+    try {
+      if (updater === null) return { ok: false, error: { message: '还没有连接到服务端' } }
+      await updater.download()
+      return { ok: true }
+    } catch (error) {
+      return { ok: false, error: errorOf(error) }
+    }
+  })
+  ipcMain.handle('knowwork:install-update', () => {
+    if (updater === null) return { ok: false, error: { message: '还没有连接到服务端' } }
+    updater.installAndRestart()
+    return { ok: true }
+  })
 
   // 本机对话的桥（M4/M5）：网页版的「本机」来源经 preload 调到这里；文件能力按每段对话的工作文件夹解析
   folders = createFolders({ file: join(app.getPath('userData'), 'conversation-folders.json'), log })
@@ -194,8 +210,6 @@ async function start() {
     const result = await dialog.showOpenDialog(window, { properties: ['openDirectory', 'createDirectory'] })
     return { ok: true, path: result.canceled ? null : result.filePaths[0] }
   })
-  ipcMain.handle('knowwork:download-update', () => updater?.download())
-  ipcMain.handle('knowwork:install-update', () => updater?.installAndRestart())
 
   window.loadFile(join(import.meta.dirname, 'resources', 'connect.html'))
   window.show()
@@ -300,6 +314,10 @@ async function startDeviceSide(origin, userData, tokens, folders) {
         KNOWWORK_MODEL_PROVIDER: 'knowwork-gateway',
         KNOWWORK_MODEL_BASE_URL: `${origin}/api/model/v1`,
         KNOWWORK_MODEL_TOKEN: model.accessToken,
+        // 打包态把自带 Node/Python 前置进 PATH：宿主起的 bash 与技能脚本找得到
+        ...(app.isPackaged
+          ? { PATH: `${join(process.resourcesPath, 'node')}:${join(process.resourcesPath, 'python', 'bin')}:${process.env.PATH ?? ''}` }
+          : {}),
       },
       onExit: () => conversations?.hostRestarted(),
       log,
@@ -338,7 +356,21 @@ function ensureUpdater(origin) {
     server: origin,
     log,
     onUpdate: state => {
-      if (state.kind === 'available') sendState({ kind: 'update', version: state.version })
+      if (state.kind === 'available') {
+        sendState({ kind: 'update', version: state.version })
+        // 需求口径：提示更新，员工同意就下载（下载完成装在退出时；点通知可立即重启安装）
+        const version = state.version ?? ''
+        dialog.showMessageBox(window, {
+          type: 'info',
+          message: `发现新版桌面端 ${version}`,
+          detail: '现在下载吗？下载完成后会在退出时安装，下次打开就是新版本。',
+          buttons: ['现在下载', '以后再说'],
+          defaultId: 0,
+          cancelId: 1,
+        }).then(({ response }) => {
+          if (response === 0) updater.download()
+        }).catch(error => log('更新对话框失败：', error))
+      }
       if (state.kind === 'downloaded') {
         const notification = Notification.isSupported()
           ? new Notification({ title: '新版桌面端已就绪', body: '下次打开就是新版本；现在就装的话会重启应用。' })

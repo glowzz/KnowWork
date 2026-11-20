@@ -28,6 +28,18 @@ jobs:
         working-directory: runtime-host
         run: npm install --no-fund --no-audit
 
+      # 桌面自带的 Python（清单与沙箱镜像同一份）：prepare-runtime 用 uv 装 venv
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+
+      # 自带的 LibreOffice：mac 装 cask（/Applications/LibreOffice.app），Windows 装 fresh
+      # （C:\Program Files\LibreOffice）；prepare-runtime 按平台归一到 resources/office/
+      - if: matrix.platform == 'darwin'
+        run: brew install --cask libreoffice
+      - if: matrix.platform == 'win32'
+        run: choco install libreoffice-fresh -y --no-progress
+
       # 桌面壳（含 electron 与 electron-updater）
       - name: Install desktop dependencies
         working-directory: desktop
@@ -42,15 +54,16 @@ jobs:
       - name: Prepare runtime (node + python + office)
         working-directory: desktop
         shell: bash
-        run: |
-          node scripts/prepare-runtime.mjs --platform ${{ matrix.platform }}
+        run: node scripts/prepare-runtime.mjs --platform ${{ matrix.platform }}
         env:
-          # LibreOffice 25.2 免安装目录由发布流水线提供（下载解压到 workspace 再指向它）
-          KNOWWORK_OFFICE_DIR: ${{ matrix.platform == 'darwin' && './office-darwin' || './office-win32' }}
+          # LibreOffice 的安装位置：mac 是 /Applications（里面有 LibreOffice.app），Windows 是安装根
+          # （里面有 program/soffice.exe）；prepare-runtime 归一到 resources/office/
+          KNOWWORK_OFFICE_DIR: ${{ matrix.platform == 'darwin' && '/Applications' || 'C:\Program Files\LibreOffice' }}
 
       - name: Build
         working-directory: desktop
-        run: npx electron-builder --${{ matrix.platform }}
+        # electron-builder 的标准平台参数是 --mac/--win（别用 --darwin/--win32 这种非标准写法）
+        run: npx electron-builder ${{ matrix.platform == 'darwin' && '--mac --arm64' || '--win --x64' }}
 
       - uses: actions/upload-artifact@v4
         with:
@@ -60,3 +73,5 @@ jobs:
             desktop/release/*.zip
             desktop/release/*.exe
             desktop/release/latest.yml
+            desktop/release/latest-mac.yml
+            desktop/release/*.blockmap
