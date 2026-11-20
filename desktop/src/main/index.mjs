@@ -18,11 +18,15 @@ import { browserLogin } from './auth/login.mjs'
 import { clearServer, loadOrCreateDevice, loadServer, saveServer } from './config.mjs'
 import { parseConnectUrl } from './deeplink.mjs'
 import { assembleProfileHome, startHostProcess, superviseHost } from './host.mjs'
+import { createFileOps } from './files.mjs'
+import { createFolders } from './folders.mjs'
+import { convertToPdf } from './office.mjs'
 import { createHostClient } from './host-client.mjs'
 import { createNotifier } from './notify.mjs'
 import { createRelay } from './relay.mjs'
 import { createEncryptedStore } from './secure-store.mjs'
 import { createTokens, NotLoggedIn } from './tokens.mjs'
+import { createUpdater } from './update.mjs'
 import { createConversations } from './turns.mjs'
 
 const SCHEME = 'knowwork'
@@ -122,7 +126,9 @@ async function start() {
     return true
   })
 
-  // 本机对话的桥（M4）：网页版的「本机」来源经 preload 调到这里
+  // 本机对话的桥（M4/M5）：网页版的「本机」来源经 preload 调到这里；文件能力按每段对话的工作文件夹解析
+  const folders = createFolders({ file: join(app.getPath('userData'), 'conversation-folders.json'), log })
+  const fileOps = createFileOps({ folders, office: { convertToPdf }, dialog, shell, log })
   const conversationCall = handler => async (_event, ...args) => {
     try {
       if (runtime === null) throw new Error('还没有登录，或宿主没有就绪')
@@ -133,9 +139,24 @@ async function start() {
   }
   ipcMain.handle('knowwork:start-conversation', conversationCall(async payload => {
     const conversation = await runtime.api.createConversation(payload.workspaceId, payload.title ?? '')
+    await folders.set(conversation.id, payload.folder)
     await runtime.conversations.send(conversation.id, payload.turn)
     return { id: conversation.id }
   }))
+  // 文件能力（M5）：读原件、转 PDF（预览）、另存、用本机程序打开、@ 补全、拖入转 @ 路径
+  const bytes = value => Buffer.from(value)
+  ipcMain.handle('knowwork:files-read', conversationCall(async (conversationId, path) => ({
+    bytes: bytes(await fileOps.read(conversationId, path)),
+  })))
+  ipcMain.handle('knowwork:files-pdf', conversationCall(async (conversationId, path) => ({
+    bytes: bytes(await fileOps.pdf(conversationId, path)),
+  })))
+  ipcMain.handle('knowwork:files-save', conversationCall((conversationId, path) => fileOps.save(conversationId, path)))
+  ipcMain.handle('knowwork:files-open', conversationCall((conversationId, path, how) => fileOps.open(conversationId, path, how)))
+  ipcMain.handle('knowwork:files-references', conversationCall(async (conversationId, query) => ({
+    references: await fileOps.references(conversationId, query),
+  })))
+  ipcMain.handle('knowwork:drop-files', conversationCall((conversationId, paths) => fileOps.mentionsForPaths(conversationId, paths)))
   ipcMain.handle('knowwork:send', conversationCall((conversationId, turn) => runtime.conversations.send(conversationId, turn)))
   ipcMain.handle('knowwork:cancel', conversationCall(conversationId => runtime.conversations.cancel(conversationId)))
   ipcMain.handle('knowwork:decide', conversationCall((conversationId, approvalId, allow, remember) =>
@@ -160,6 +181,8 @@ async function start() {
     const result = await dialog.showOpenDialog(window, { properties: ['openDirectory', 'createDirectory'] })
     return { ok: true, path: result.canceled ? null : result.filePaths[0] }
   })
+  ipcMain.handle('knowwork:download-update', () => updater?.download())
+  ipcMain.handle('knowwork:install-update', () => updater?.installAndRestart())
 
   window.loadFile(join(import.meta.dirname, 'resources', 'connect.html'))
   window.show()
@@ -181,6 +204,7 @@ async function applyServer(address, userData) {
   if (origin === null) return { ok: false, error: { message: '服务地址要用 http(s) 的完整地址' } }
   server = origin
   await saveServer(join(userData, 'server.json'), origin)
+  ensureUpdater(origin)
   sendState({ kind: 'logging-in' })
   try {
     await enter(origin, userData)
@@ -290,6 +314,28 @@ async function startDeviceSide(origin, userData, tokens) {
 
   runtime = { tokens, api, relay, conversations, supervisor, notifier, origin }
   await supervisor.ensure()
+}
+
+let updater = null
+
+/** 自动更新（M6）：网关 /desktop/ 的清单，有新版只提示、装在退出时。服务地址定了才建（一次）。 */
+function ensureUpdater(origin) {
+  if (updater !== null) return
+  updater = createUpdater({
+    server: origin,
+    log,
+    onUpdate: state => {
+      if (state.kind === 'available') sendState({ kind: 'update', version: state.version })
+      if (state.kind === 'downloaded') {
+        const notification = Notification.isSupported()
+          ? new Notification({ title: '新版桌面端已就绪', body: '下次打开就是新版本；现在就装的话会重启应用。' })
+          : null
+        notification?.on('click', () => updater.installAndRestart())
+        notification?.show()
+      }
+    },
+  })
+  updater.check()
 }
 
 function setSessionCookie(origin, webSession) {

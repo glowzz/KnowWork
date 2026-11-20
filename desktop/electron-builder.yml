@@ -1,4 +1,5 @@
-# 桌面端的打包配置（M6 才接交付；这里先把 Mac/Win 两个安装包的目标定下来）。
+# 桌面端的打包配置。M6 交付：安装包 + 更新清单从 CI 出（.github/workflows/desktop.yml），
+# 交付包整理见 desktop/scripts/build-delivery.mjs，对应网关的 /desktop/ 位置（deploy/gateway/nginx.conf）。
 # 这一版安装包不签名：Mac 第一次打开要在「系统设置 → 隐私与安全性」里放行，Windows 提示「未知发布者」。
 appId: com.knowwork.desktop
 productName: KnowWork 桌面端
@@ -8,7 +9,16 @@ files:
   - src/**/*
   - package.json
   - "!tests/**"
+  - "!scripts/**"
   - "!release/**"
+  - "!resources/**"
+# 自带运行时（scripts/prepare-runtime.mjs 先备齐 resources/）：本机宿主的配置档与依赖树、
+# 独立 Node（24.9+，宿主与 PTC 用）、Python（清单与沙箱镜像同一份）、LibreOffice（Office 引擎）
+extraResources:
+  - { from: resources/runtime-host, to: runtime-host }
+  - { from: resources/node, to: node }
+  - { from: resources/python, to: python }
+  - { from: resources/office, to: office }
 protocols:
   - name: KnowWork
     schemes:

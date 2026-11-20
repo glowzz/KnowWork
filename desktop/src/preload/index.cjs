@@ -8,7 +8,7 @@
  * 沙箱开启的 preload：只拿 ipcRenderer 与命令行里的参数。
  */
 
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 const argvArgument = (name) => {
   const prefix = `--${name}=`
@@ -54,4 +54,26 @@ contextBridge.exposeInMainWorld('knowworkDesktop', {
   place: invoke('knowwork:place'),
   /** 选工作文件夹：弹系统目录选择框，返回 {path}（取消是 null）。 */
   pickFolder: invoke('knowwork:pick-folder'),
+
+  // —— 自动更新（M6）：有新版只提示，下载完装在退出时 ——
+  downloadUpdate: invoke('knowwork:download-update'),
+  installUpdate: invoke('knowwork:install-update'),
+
+  // —— 文件能力（M5）：路径按这段对话的工作文件夹解析，读原件与转 PDF 回字节 ——
+  filesRead: invoke('knowwork:files-read'),
+  filesPdf: invoke('knowwork:files-pdf'),
+  filesSave: invoke('knowwork:files-save'),
+  filesOpen: invoke('knowwork:files-open'),
+  filesReferences: invoke('knowwork:files-references'),
+  /** 拖进输入框的 File 对象：在 preload 里用 webUtils 拿真实路径（渲染进程拿不到），转成 @路径。 */
+  dropFiles: (files, conversationId) => {
+    const paths = []
+    for (const file of files) {
+      try {
+        const path = webUtils.getPathForFile(file)
+        if (typeof path === 'string' && path.length > 0) paths.push(path)
+      } catch { /* 拿不到路径的（比如目录虚拟项）跳过 */ }
+    }
+    return invoke('knowwork:drop-files', conversationId, paths)()
+  },
 })

@@ -1,0 +1,62 @@
+# 桌面端的打包 CI：Mac（Apple 芯片）与 Windows（x64）两包，未签名；产物上传后人工整理成交付包
+# （desktop/scripts/build-delivery.mjs 的口径）。DSh/Node/Python/LibreOffice 的版本钉在
+# desktop/resources-manifest.json（tests/manifest.test.mjs 与沙箱镜像核对）。
+name: desktop
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            platform: darwin
+          - os: windows-latest
+            platform: win32
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # 本机宿主的运行时（runtime-host）：生产依赖
+      - name: Install runtime-host dependencies
+        working-directory: runtime-host
+        run: npm install --no-fund --no-audit
+
+      # 桌面壳（含 electron 与 electron-updater）
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm install --no-fund --no-audit
+
+      # 纯逻辑测试 + 清单一致性
+      - name: Test
+        working-directory: desktop
+        run: npm test
+
+      # 备齐自带运行时：runtime-host 树、独立 Node、Python、LibreOffice（见 scripts/prepare-runtime.mjs）
+      - name: Prepare runtime (node + python + office)
+        working-directory: desktop
+        shell: bash
+        run: |
+          node scripts/prepare-runtime.mjs --platform ${{ matrix.platform }}
+        env:
+          # LibreOffice 25.2 免安装目录由发布流水线提供（下载解压到 workspace 再指向它）
+          KNOWWORK_OFFICE_DIR: ${{ matrix.platform == 'darwin' && './office-darwin' || './office-win32' }}
+
+      - name: Build
+        working-directory: desktop
+        run: npx electron-builder --${{ matrix.platform }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: knowwork-desktop-${{ matrix.platform }}
+          path: |
+            desktop/release/*.dmg
+            desktop/release/*.zip
+            desktop/release/*.exe
+            desktop/release/latest.yml

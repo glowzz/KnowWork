@@ -13,5 +13,9 @@
   "devDependencies": {
     "electron": "^37.0.0",
     "electron-builder": "^25.0.0"
-  }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
+  },
+  "author": "KnowWork"
 }

@@ -5,8 +5,9 @@ deploy/.env
 # 打包脚本的输出
 /dist/
 .dev/
-# 桌面端的打包产物（electron-builder 的输出目录）
+# 桌面端的打包产物（electron-builder 的输出目录与自带运行时的暂存目录）
 desktop/release/
+desktop/resources/
 # 没配 KNOWWORK_BLOB_DIR 时，在 server/ 下跑服务或测试，文件默认存到这里
 server/data/
 __pycache__/
