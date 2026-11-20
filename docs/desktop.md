@@ -11,7 +11,9 @@
 > （OAuth 登记、设备路由、令牌受众、空间开关与配额），记录见第 10 节；M3 已完成（2026-11-20）——
 > 桌面壳落仓 `desktop/`（深链、系统浏览器登录、令牌入安全存储、内嵌网页版带登录态），记录见第 11 节；
 > M4 已完成（2026-11-20）——本机对话全链路（宿主托管、事件回传、审批/提问/三档经桥、系统通知、
-> 扩展前端包登记「本机」来源），记录见第 12 节。
+> 扩展前端包登记「本机」来源），记录见第 12 节；M5 已完成（2026-11-21）——文件能力（读/预览/另存/
+> 打开/@ 补全/拖入转 @）与工作文件夹注册表，记录见第 13 节；M6 已完成（2026-11-21）——打包交付
+> （清单一致性、自动更新、electron-builder、CI、镜像装扩展开关），记录见第 14 节。
 > 文中早期的目录名 `dsh-host-device` 按仓库既有约定改成了 `desktop-host-bundle`。
 
 ---
@@ -350,6 +352,100 @@ git merge upstream/main --no-ff # 跟着上游发版同步
 （@ 了哪些资料、这个人能不能用、用哪种回答方式，和网页上发消息走同一段准备），再交给本机的宿主去执行。执行中产生的事件原样
 按顺序送回业务服务，所以本机对话也是业务服务里的一条普通对话，网页和手机上都看得到，只读，写明是在哪台电脑上执行的。
 对话在员工的电脑上执行，账号、权限、模型和对话记录仍然在服务端。
+
+## 12. M4 落地记录（2026-11-20）
+
+### 12.1 落了什么
+
+| 部分 | 位置 | 内容 |
+|---|---|---|
+| 宿主托管 | `desktop/src/main/host.mjs` | 组装 DSH_HOME（与 runtime-host E1 的 harness 同一套）→ 自带 Node 起官方 dsh 设备配置档 → 等就绪行 → 健康检查；崩溃退避重启（监督者，连挂上限放弃） |
+| 宿主客户端 | `desktop/src/main/host-client.mjs` | 设备宿主的 HTTP 接口（开/恢复会话、发轮、取消、事件流、审批、提问、三档、令牌轮换、模型清单） |
+| 业务客户端 | `desktop/src/main/api.mjs` | M2 设备路由的客户端（建对话、会话合同、准备一轮、收事件/逐字、记授权、模型清单、place、删除）；401 翻 NotLoggedIn |
+| 事件中继 | `desktop/src/main/relay.mjs` | 消费宿主根会话流（子 Agent 事件已被插件转发到根上），分类回传：`session/event` 成批（≤500，去抖 150ms）、`subagent/event` 带子会话编号、`assistant/stream` 只在轮次进行中转发、`agent/status` 不回传；断流重连从 after=0 重放（业务服务按官方序号去重） |
+| 轮次编排 | `desktop/src/main/turns.mjs` | prepare（与网页同一套准备，429/设备不符等说法原样）→ 工具/技能受众令牌每轮现换 → 宿主对齐会话（已开不动、丢了按恢复合同重开再发）→ 发轮；审批「不再询问」先记授权（按待答项找工具名）再交宿主；三档查切；删除解绑 |
+| 等人提示 | `desktop/src/main/notify.mjs` | `approval/asked`/`question/requested` 且窗口不在前台才叫，同一项不重复；前台看过没处理，走开会再提醒一次 |
+| 胶水接线 | `desktop/src/main/index.mjs`、`preload` | 登录后后台拉起宿主（模型受众令牌随 env + 到期轮换）、`knowwork:start-conversation/send/cancel/decide/answer/delete/set-access/get-access/access-catalog/can-continue/place/pick-folder` 一组桥、通知弹窗与任务栏闪烁 |
+| 扩展前端包 | `extensions/desktop/web/src/` | `chat.sources` 登记「本机」来源（工作文件夹 Picker、三档 Controls、useBlocker、start/actions 全走桥）、`chat.place` 登记设备名提示；`KNOWWORK_WEB_EXTENSIONS` 指到 `extensions/desktop/web/src/index.ts` 即随网页版构建 |
+| 验证 | `desktop/tests/`（38 个用例）+ 真机冒烟 `desktop/scripts/smoke-real-host.mjs` | 托管/客户端/中继/编排/通知全过；真机冒烟用托管模块起真实 DSH 设备宿主 + 官方模拟模型服务（就绪、health、三档预设全在）；带扩展入口的网页版构建通过 |
+
+### 12.2 实现决定
+
+- **子 Agent 事件不用壳单独跟进**：knowwork 的 `subagent-policy` 插件已把子会话事件转发到根会话的流上
+  （`subagent/event`，`data.sessionId` 是子会话）——壳只跟根会话一条流，按帧分类回传。
+- **续传靠业务服务去重**：断流/宿主重启后中继从宿主流的 0 重放，官方序号在业务服务的 push 里跳过
+  （device.py 的重传语义）——壳不用持久化游标。
+- **令牌的节奏**：模型受众令牌随宿主 env + 到期一半轮换（写进官方凭据服务）；工具/技能受众令牌每轮现换
+  （开会话随合同带上，已开就轮换凭据）。
+- **前端包的 react 解析**：扩展在 web 工程外，`extensions/desktop/web/node_modules` 以相对符号链接指到
+  `web/node_modules`（避免双 React 实例）。
+- **dsh 的真实入口**：`.bin/dsh` 是 shell 包装脚本，托管用 `node_modules/@deepseek-ai/dsh/lib/bin.js`
+  直接以 Node 跑；运行时宿主要求 Node 24.9+，打包自带 Node 按这个版本带（M6）。
+
+### 12.3 端到端验收路径（开发机）
+
+1. 起服务端（装了扩展：`uv pip install --no-deps ../extensions/desktop`）与网页版；
+2. `cd desktop && KNOWWORK_RUNTIME_ROOT=../runtime-host npm start`，深链或填地址登录；
+3. 新对话页输入框下面选「本机」→ 选工作文件夹 → 发第一句；宿主在本机执行，事件回传业务服务；
+4. 另一台机器的网页打开这段对话：只读、实时看到全程、写明在哪台电脑上执行；
+5. 壳里等审批时切走窗口：系统通知 + 任务栏闪烁；批准与「不再询问」照常。
+
+## 13. M5 落地记录（2026-11-21）
+
+### 13.1 落了什么
+
+| 部分 | 位置 | 内容 |
+|---|---|---|
+| 工作文件夹注册表 | `desktop/src/main/folders.mjs` | 每段本机对话的工作文件夹（建对话时经桥登记，落盘 userData——壳重启后交付的文件还解析得出来）；`resolveInFolder` 相对拼绝对 + 越界拒收 |
+| 文件能力 | `desktop/src/main/files.mjs` | 读原件（字节）、转 PDF（pdf 直回、其余走引擎）、另存（对话框注入）、本机程序打开/显示、@ 补全（隐藏目录跳过、深度 3/上限 500/命中 20、带空格加引号）、拖入转 @ 路径（文件夹外的不悄悄外带） |
+| Office 引擎 | `desktop/src/main/office.mjs` | LibreOffice 无头转换（独立 UserInstallation，不跟用户开着的冲突）；真机用打包的 soffice，单测用假 soffice 验证编排 |
+| 桥与前端包 | preload + `deviceSource.tsx` | `filesRead/Pdf/Save/Open/References`（字节走 ipc 结构化拷贝）+ `dropFiles`（preload 里 webUtils 取真实路径）；前端包按 ConversationFiles 合同接上 |
+| 顺手的修复 | `turns.mjs` | M4 遗留：开会话的合同体缺 `cwd`——工作文件夹注册表一起落地，openSession 带 cwd（无记录时报「重新创建对话」） |
+
+测试 +9（folders/files/turns 的 cwd），壳 47/47。
+
+### 13.2 实现决定
+
+- **路径都限制在工作文件夹内**（resolveInFolder 的包含检查）：交付与文件链接的路径来自这段对话自己的
+  工作区，越界不读不外带（拖入工作文件夹外的文件进 skipped，让模型自己处理）。
+- **@ 的 insert 照官方语法**：路径原样、带空格或引号的加引号（内层转义）。
+- **office 转换的引擎注入**：dev 用 PATH 里的 soffice（本机没有就装），打包用 resources/office 自带的；
+  单测的假 soffice 是 shell 脚本（POSIX，dash 也能跑），验证编排（输出定位、超时、失败翻 OfficeError）。
+
+## 14. M6 落地记录（2026-11-21）
+
+### 14.1 落了什么
+
+| 部分 | 位置 | 内容 |
+|---|---|---|
+| 清单与一致性 | `desktop/resources-manifest.json` + `tests/manifest.test.mjs` | Python 库/Node 库/LibreOffice/DSH 版本与 `sandbox.Dockerfile`、`runtime-host` 核对——落地当天就抓到 DSH 已挪 rc.5 |
+| 自动更新 | `desktop/src/main/update.mjs` | electron-updater 的 generic provider 指到网关 `/desktop/`：有新版只提示、下载完成装在退出时（需求原话）；弹窗点击即装并重启 |
+| 打包配置 | `desktop/electron-builder.yml` | extraResources：`runtime-host` 树（prune 后）、自带 Node（24.9+）、Python、LibreOffice；Mac arm64 / Win x64 |
+| 准备脚本 | `desktop/scripts/prepare-runtime.mjs` | 按平台备齐 resources/：拷 runtime-host 树（npm prune）、从 nodejs.org 拉独立 Node、Python/LibreOffice 按 manifest 装配（CI 里 KNOWWORK_OFFICE_DIR 指向免安装目录）；本机已验证 darwin 段跑通（node 199M、runtime-host 674M） |
+| 交付脚本 | `desktop/scripts/build-delivery.mjs` | electron-builder 产物 + 更新清单 → `deploy/html/desktop/<版本>/` + manifest.json（版本、文件、sha256）——网关 `/desktop/` 现成位置，不用重启服务 |
+| CI | `.github/workflows/desktop.yml` | macos-latest（arm64）/ windows-latest（x64）矩阵：装依赖 → 测试 → prepare → electron-builder → 传产物 |
+| 镜像接线 | `deploy/docker/server.Dockerfile` | 构建参数 `KNOWWORK_BUILD_DESKTOP=1` 才装桌面端扩展（装在最后一次 `uv sync` 之后——sync 会把 venv 修剪回锁内；没装的开源部署不受影响） |
+
+### 14.2 实现决定与备忘
+
+- **一致性测试落地即有效**：正则的三个坑（pip 块解析、markitdown 的 extras 括号、npm 续行）修完还抓到
+  runtime-host 的 DSH 已挪到 0.2.2-rc.5——清单跟着同步，这正是这个测试存在的意义。
+- **自带 Node 用 24.9+**：宿主 engines 的下限；沙箱镜像里 PTC 用 Node 22，PTC 行为差异仅这一个工具（清单里注明）。
+- **更新策略照需求原话**：`autoDownload=false` + `autoInstallOnAppQuit=true`——「服务端换了新版桌面端，
+  员工下次打开时会提示更新」。
+- **electron-builder 配置已在 Linux 上 `--dir` 冒烟**（app.asar + 自带运行时都进了包）；mac/win 的真包要
+  CI 构建机出（workflow 就位），未签名指引在 README 与 electron-builder.yml 的注释里。
+- **镜像默认不带桌面端扩展**：`KNOWWORK_BUILD_DESKTOP=1` 的构建参数控制，与桌面应用一个版本走（M2 的
+  决定）。扩展装上后原生应用的授权端点、公开回调入口即生效。
+
+### 14.3 全里程碑小结
+
+- 桌面壳 56/56（含清单一致性 6、更新 3）、扩展包 13/13、真机冒烟（真实 DSH + 官方模拟模型服务）、
+  带扩展入口的网页版构建、electron-builder --dir 冒烟，全绿。
+- 剩余要真机做的：mac/win 构建机出安装包（CI 就位后一键）、壳内连真实部署的端到端联调（12.3 的
+  验收路径）、安装包签名（现在按未签名指引放行）。
+
+## 附录 A：需求原文（上游公众号文章的桌面端部分）
 
 分工：员工电脑上是 DSH 官方宿主、工作文件夹、自带的 Python 和 Node；业务服务管账号权限、每一轮的准备、短期令牌、
 模型网关和对话记录。本机上，知识库和 @、技能、选模型、专家照常能用。工作文件夹里的文件能 @，能把文件拖进对话，

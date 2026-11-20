@@ -12,6 +12,16 @@ src/main/
 ├── config.mjs         # 服务地址与设备身份的持久化（纯逻辑）
 ├── deeplink.mjs       # knowwork://connect 解析（纯逻辑）
 ├── tokens.mjs         # 令牌存取 + 快过期刷新 + 按受众换（纯逻辑）
+├── folders.mjs        # 每段本机对话的工作文件夹注册表 + 路径解析（纯逻辑）
+├── files.mjs          # 文件能力：读/转 PDF/另存/打开/@ 补全/拖入转 @（纯逻辑）
+├── office.mjs         # LibreOffice 无头转换（Office → PDF 预览）
+├── host.mjs           # 本机宿主托管：配置档组装 + 进程监督重启（M4，纯逻辑）
+├── host-client.mjs    # 本机宿主 HTTP 客户端（M4）
+├── api.mjs            # 业务服务设备路由客户端（M4）
+├── relay.mjs          # 事件回传中继：分类、成批、断流续传（M4，纯逻辑）
+├── turns.mjs          # 本机对话编排：prepare → 喂宿主 → 回传，审批/提问/三档（M4）
+├── notify.mjs         # 等批准/回答且窗口不在前台时的提示判定（M4）
+├── update.mjs         # 自动更新：网关 /desktop/ 清单，提示 + 退出时安装（M6）
 ├── auth/
 │   ├── pkce.mjs       # RFC 7636（纯逻辑）
 │   ├── loopback.mjs   # 回环监听收授权码（RFC 8252 7.3，纯逻辑）
@@ -19,7 +29,12 @@ src/main/
 │   └── login.mjs      # 登录编排（纯逻辑）
 └── resources/connect.html  # 连接页（手工填地址或等待深链）
 src/preload/index.cjs # 外壳桥：window.knowworkShell.origin + window.knowworkDesktop
-tests/                # node:test，20 个用例（纯逻辑全量；Electron 胶水不进单测）
+scripts/
+├── prepare-runtime.mjs     # M6：备齐 resources/（runtime-host 树、独立 Node、Python、LibreOffice）
+├── build-delivery.mjs      # M6：安装包 + 更新清单 → 交付目录（网关 /desktop/）
+├── manifest.mjs            # 清单的 ESM 出口
+└── smoke-real-host.mjs     # 真机冒烟：托管模块起真实 DSH 设备宿主 + 官方模拟模型服务
+tests/                # node:test，56 个用例（纯逻辑全量 + 清单一致性 + 更新；Electron 胶水不进单测）
 ```
 
 纯逻辑模块零依赖、零构建（同 runtime-host 的路子）；`login` 编排的浏览器一步是注入的，
@@ -46,8 +61,21 @@ npm run dist         # electron-builder：Mac（arm64 dmg/zip）与 Windows（x6
   `electron-builder.yml` 的 `protocols` 与各平台注册差异）。
 - 这一版安装包不签名：Mac 首次打开在「系统设置 → 隐私与安全性」放行，Windows 提示「未知发布者」。
 
-## M3 之后
+## 文件能力（M5）与本机对话（M4）
 
-- M4：本机宿主托管（`resources/node` 起设备宿主）、每一轮的 prepare→喂宿主→事件回传、审批/提问通知。
-- M5：文件能力（工作文件夹、@ 补全、拖入拖出、Office 预览）走同一座桥（`knowworkDesktop`）补。
-- M6：`/desktop/` 更新清单对接（启动检查、下次打开安装）与交付包。
+- 新对话选「本机」→ 选工作文件夹 → 发第一句：主进程 prepare（业务服务同一套准备）→ 带工作文件夹开会话
+  → 发给本机宿主 → 事件成批回传业务服务（网页和手机只读实时可见）。
+- 回答里的文件链接/交付卡片：读原件预览、Office 转 PDF（自带引擎）、另存、用本机程序打开、在文件管理器
+  显示；拖进输入框的文件转 @ 路径（工作文件夹外的不外带）。
+- 三档访问方式在会话页切换（DSH 官方权限预设，切换记录进会话日志）。
+
+## 打包与交付（M6）
+
+```sh
+node scripts/prepare-runtime.mjs --platform darwin|win32   # 备齐 resources/（含独立 Node 与清单钉版）
+npx electron-builder --mac --arm64 | --win --x64           # 出安装包（未签名）
+node scripts/build-delivery.mjs                            # 安装包 + 更新清单 → deploy/html/desktop/<版本>/
+```
+
+CI（`.github/workflows/desktop.yml`）在 mac/win 构建机上自动跑同一条流水线；版本清单见
+`desktop/resources-manifest.json`（与沙箱镜像的一致性由 `tests/manifest.test.mjs` 钉着）。
