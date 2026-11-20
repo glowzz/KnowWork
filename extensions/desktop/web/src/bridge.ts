@@ -20,7 +20,7 @@ type Bridge = {
   pickFolder(): Promise<Result & { path?: string | null }>;
 };
 
-type Result = { ok: true } | { ok: false; error?: { status?: number; code?: string; message?: string } };
+export type Result = { ok: true } | { ok: false; error?: { status?: number; code?: string; message?: string } };
 
 export function bridgeAvailable(): boolean {
   return typeof window !== 'undefined' && typeof (window as { knowworkDesktop?: unknown }).knowworkDesktop === 'object';

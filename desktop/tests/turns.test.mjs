@@ -104,15 +104,28 @@ function stubHost() {
     }
 }
 
-function makeWorld({ api, host, tokens, relay } = {}) {
+function makeWorld({ api, host, tokens, relay, folders } = {}) {
   const world = {
     api: api ?? stubApi(),
     tokens: tokens ?? stubTokens(),
     relay: relay ?? stubRelay(),
     host: host ?? stubHost(),
+    folders: folders ?? stubFolders(),
   }
-  world.conversations = createConversations({ api: world.api, host: world.host, relay: world.relay, tokens: world.tokens })
+  world.conversations = createConversations({ api: world.api, host: world.host, relay: world.relay,
+                                              tokens: world.tokens, folders: world.folders })
   return world
+}
+
+function stubFolders({ missing = false } = {}) {
+  const calls = []
+  return {
+    calls,
+    async get(conversationId) {
+      calls.push(['get', conversationId])
+      return missing ? null : '/Users/lei/工作 文件夹'
+    },
+  }
 }
 
 test('首轮：同步模型清单、带受众令牌开会话、启动中继、发这一轮', async () => {
@@ -122,6 +135,7 @@ test('首轮：同步模型清单、带受众令牌开会话、启动中继、�
   assert.deepEqual(order, ['sync-models', 'open', 'send'])
   const open = world.host.calls.find(c => c[0] === 'open')[1]
   assert.equal(open.sessionId, 'c_1')
+  assert.equal(open.cwd, '/Users/lei/工作 文件夹', '会话的工作目录就是工作文件夹')
   assert.equal(open.tools.token, 'tok-tools')
   assert.equal(open.skills.token, 'tok-skills')
   assert.equal(open.resume, false)
@@ -146,6 +160,14 @@ test('宿主丢了会话：按恢复合同重开再发一次', async () => {
   assert.ok(calls.some(c => c[0] === 'open' && c[1].resume === true), '恢复方式重开')
   const sends = calls.filter(c => c[0] === 'send')
   assert.equal(sends.length, 2, '第二轮发出去了')
+})
+
+test('没有记录工作文件夹：发不出去并给说法', async () => {
+  const world = makeWorld({ folders: stubFolders({ missing: true }) })
+  await assert.rejects(
+    world.conversations.send('c_1', { text: '第一轮', mode: 'followup' }),
+    /没有记录工作文件夹/,
+  )
 })
 
 test('审批：勾了不再询问先记授权（按待答项找工具名），再交宿主', async () => {

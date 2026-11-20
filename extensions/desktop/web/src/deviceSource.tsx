@@ -10,7 +10,9 @@ import { useWorkspaceStore } from '@knowwork/web/stores/workspace';
 import type { AnswerMode, QuestionAnswer } from '@knowwork/web/api/conversations';
 import type { ConversationSource } from '@knowwork/web/features/chat/sources';
 import type { InputLimits } from '@knowwork/web/features/chat/components/Composer';
-import { bridge, unwrap, bridgeAvailable } from './bridge';
+import { bridge, unwrap, bridgeAvailable, type Result } from './bridge';
+
+type FileReference = { path: string; kind: 'file' | 'directory'; insert: string };
 
 type TurnRequest = {
   readonly text: string;
@@ -120,7 +122,7 @@ function AccessControl({ conversationId }: { readonly conversationId: string }):
 }
 
 const LIMITS: InputLimits = {
-  attachments: { tip: '本机对话的文件在工作文件夹里：用 @ 或拖进来提（即将支持拖入）', blocked: '本机对话暂不收附件：文件在工作文件夹里用 @ 提' },
+  attachments: { tip: '本机对话的文件在工作文件夹里：发过第一句后拖进来或用 @ 提', blocked: '本机对话暂不收附件：发过第一句后拖进来，或用 @ 提工作文件夹里的文件' },
 };
 
 /** 发一轮：附件不传（本机对话的文件在工作文件夹里，M5 起经 dropFiles 转 @ 路径），其余原样。 */
@@ -181,6 +183,32 @@ export function deviceSource(): ConversationSource {
       },
       remembersApprovals: true,
     },
-    // files/dropFiles 在 M5 接：本机对话里的文件读写、另存、拖入拖出
+    files: {
+      read: async (conversationId: string, path: string) => {
+        const { bytes } = await unwrap(bridge().filesRead(conversationId, path));
+        return bytes as unknown as ArrayBuffer;
+      },
+      pdf: async (conversationId: string, path: string) => {
+        const { bytes } = await unwrap(bridge().filesPdf(conversationId, path));
+        return bytes as unknown as ArrayBuffer;
+      },
+      save: async (conversationId: string, path: string) => {
+        await unwrap(bridge().filesSave(conversationId, path));
+      },
+      open: async (conversationId: string, path: string, how: 'app' | 'reveal') => {
+        await unwrap(bridge().filesOpen(conversationId, path, how));
+      },
+      references: async (conversationId: string, query: string) => {
+        const { references } = await unwrap(bridge().filesReferences(conversationId, query));
+        return (references ?? []) as FileReference[];
+      },
+    },
+    dropFiles: async (files: readonly File[], conversationId: string | null) => {
+      if (conversationId === null) {
+        return { mentions: [], skipped: files.map(() => '') };
+      }
+      const { mentions, skipped } = await unwrap(bridge().dropFiles(files, conversationId));
+      return { mentions: mentions ?? [], skipped: skipped ?? [] };
+    },
   };
 }

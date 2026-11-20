@@ -7,7 +7,7 @@
  * 开会话随合同带上，已开着就轮换凭据。
  */
 
-export function createConversations({ api, host, relay, tokens, log = () => {} } = {}) {
+export function createConversations({ api, host, relay, tokens, folders, log = () => {} } = {}) {
   /** conversationId → 会话已在宿主上开着（宿主重启后由 ensure 对齐流程重开） */
   const open = new Map()
 
@@ -40,9 +40,12 @@ export function createConversations({ api, host, relay, tokens, log = () => {} }
     const credentials = await audienceTokens(conversationId)
     try {
       if (!open.has(conversationId)) {
-        // 开会话的合同随这一轮来（followup 才带；插话说明会话在跑，壳重启过就拿开会话的合同恢复）
+        // 开会话的合同随这一轮来（followup 才带；插话说明会话在跑，壳重启过就拿开会话的合同恢复）。
+        // 工作文件夹随合同带上（cwd）：本机宿主按它定会话的工作目录，文件与命令都在里面
         const body = prepared.session ?? await api.sessionBody(conversationId)
-        await client.openSession({ ...body, ...credentials })
+        const folder = await folders.get(conversationId)
+        if (folder === null) throw new Error('这段对话没有记录工作文件夹，请重新创建本机对话')
+        await client.openSession({ ...body, cwd: folder, ...credentials })
         open.set(conversationId, true)
         void relay.start(conversationId, client)
       } else {
@@ -56,7 +59,9 @@ export function createConversations({ api, host, relay, tokens, log = () => {} }
       // 宿主重启过，会话不在了：以恢复方式重开（业务服务说有历史）再发一次
       log('宿主上没有会话 %s，恢复重开后再发', conversationId)
       open.delete(conversationId)
-      await client.openSession({ ...await api.sessionBody(conversationId), ...credentials })
+      const folder = await folders.get(conversationId)
+      if (folder === null) throw new Error('这段对话没有记录工作文件夹，请重新创建本机对话')
+      await client.openSession({ ...await api.sessionBody(conversationId), cwd: folder, ...credentials })
       open.set(conversationId, true)
       void relay.start(conversationId, client)
       relay.get(conversationId)?.setLiveOpen(true)
