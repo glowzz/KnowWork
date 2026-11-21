@@ -12,7 +12,9 @@ export class OAuthTokenError extends Error {
 }
 
 export function authorizeUrl(server, params) {
-  const url = new URL('/api/auth/oauth/authorize', serverOrigin(server))
+  // 浏览器开的是网页版的授权确认页（/oauth/authorize，SPA；要登录，用户点「允许」才发码），
+  // 确认页把同样的查询参数转给 /api/auth/oauth/authorize 核对、批准——桌面壳不能直接开 API。
+  const url = new URL('/oauth/authorize', serverOrigin(server))
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value)
   return url.toString()
 }

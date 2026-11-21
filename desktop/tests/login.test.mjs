@@ -17,7 +17,7 @@ async function startStub({ deny = false } = {}) {
   const calls = { authorize: [], token: [] }
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? '/', 'http://stub')
-    if (url.pathname === '/api/auth/oauth/authorize') {
+    if (url.pathname === '/oauth/authorize') {
       const params = Object.fromEntries(url.searchParams)
       calls.authorize.push(params)
       const query = deny
