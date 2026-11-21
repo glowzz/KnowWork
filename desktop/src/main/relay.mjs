@@ -108,6 +108,9 @@ export function createRelay({ api, backoffMs = 1000, onFrame: onEveryFrame = nul
 
   return {
     start,
+    get(conversationId) {
+      return relays.get(conversationId)
+    },
     async stop(conversationId) {
       await relays.get(conversationId)?.stop()
     },

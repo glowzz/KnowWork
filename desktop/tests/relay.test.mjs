@@ -82,6 +82,11 @@ test('分类回传：根会话成批、子会话带编号、状态帧忽略、�
   await sleep(250)
   await relay2.stop('c_1')
   assert.ok(api2.lives.length >= 1, '轮次进行中逐字要转发')
+  // 编排拿到的是同一份 handle（turns.mjs 经 relay.get 置逐字开关）
+  assert.equal(relay2.get('c_1'), undefined, 'stop 之后取不到')
+  const handle3 = await relay2.start('c_2', host.client)
+  assert.equal(relay2.get('c_2'), handle3)
+  await relay2.stop('c_2')
 })
 
 test('去抖成批：150ms 内的事件合成一批，一批最多 500 条', async () => {
