@@ -254,34 +254,6 @@ async def test_admin_space_settings(world):
     assert got.json() == {"localSessions": False, "monthlyTurnLimit": 100}
 
 
-async def test_quota_uses_monthly_limit(world):
-    conversation_id = await a_conversation(world)
-    start = TurnStart(workspace_id=world.ws, user_id="owner", conversation_id=conversation_id)
-    # 没配上限：不判
-    await world.ctx.quota.before_turn(start)
-    from knowwork_desktop.store import set_space_settings
-    await set_space_settings(world.sessionmaker, world.ws, local_sessions=True, monthly_turn_limit=5)
-
-    class UsedAll:
-        async def turns(self, workspace_id: str, month_start, month_end) -> int:
-            assert (workspace_id, month_start.day, month_end.day) == (world.ws, 1, 1)
-            return 5
-
-    world.ctx.usage = UsedAll()
-    with pytest.raises(QuotaExceeded) as exceeded:
-        await world.ctx.quota.before_turn(start)
-    assert exceeded.value.scope == "workspace" and exceeded.value.resets_on is not None
-    assert "5 轮" in exceeded.value.message
-
-    # 用量没到上限：放行
-    class UsedTwo:
-        async def turns(self, workspace_id: str, month_start, month_end) -> int:
-            return 2
-
-    world.ctx.usage = UsedTwo()
-    await world.ctx.quota.before_turn(start)
-
-
 async def test_delete_unbinds(world):
     conversation_id = await a_conversation(world)
     response = await world.call("DELETE", f"/api/desktop/conversations/{conversation_id}")

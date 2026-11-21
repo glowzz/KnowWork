@@ -4,7 +4,6 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from knowwork_server.conversations.quota import QuotaExceeded, TurnStart
 from knowwork_server.identity.oauth import OAuthError
 from knowwork_server.identity.oauth_clients import OAuthClient
 from knowwork_server.identity.oauth_exchange import Exchanged
@@ -32,8 +31,10 @@ class Desktop:
     def setup_api(self, ctx):
         ctx.oauth_clients.register(CLIENT)
         register_exchangers(ctx)
-        register_quota(ctx)
         return [build_routes(ctx)]
+
+    def setup_worker(self, ctx) -> None:
+        pass  # 桌面端扩展没有后台任务
 
     async def start(self) -> None:
         return None
@@ -87,31 +88,6 @@ def register_exchangers(ctx) -> None:
         return Exchanged(token=issued.token, expires_in=int(identity_config.session_ttl.total_seconds()))
 
     ctx.oauth_exchangers.register(SESSION_AUDIENCE, exchange_session)
-
-
-def register_quota(ctx) -> None:
-    """本空间每月的轮次上限（desktop_space.monthly_turn_limit，不限是 NULL）：本机对话与网页等各端一起算。
-
-    计数用业务服务的用量记录（ApiContext.usage，按天记的轮次）：自然月按部署时区切。没给用量读取器、
-    没配上限，什么都不判（装了扩展不改行为）。
-    """
-
-    async def check(start: TurnStart) -> None:
-        space = await store.space_settings(ctx.global_sessionmaker, start.workspace_id)
-        limit = None if space is None else space.monthly_turn_limit
-        if not limit:
-            return
-        if ctx.usage is None:
-            return
-        timezone = ZoneInfo(ctx.settings.usage_timezone)
-        today = datetime.now(timezone).date()
-        month_start, next_month = store.month_range(today)
-        used = await ctx.usage.turns(start.workspace_id, month_start, next_month)
-        if used >= limit:
-            raise QuotaExceeded(f"这个空间本月 {limit} 轮的额度已用完，下个月恢复", scope="workspace",
-                                resets_on=next_month)
-
-    ctx.quota.set(check)
 
 
 EXTENSION = Desktop()
