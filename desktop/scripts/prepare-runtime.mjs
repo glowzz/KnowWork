@@ -12,9 +12,8 @@
  *   Contents 归一到 resources/office/Contents——运行时 resolveSoffice 找 office/Contents/MacOS/soffice）
  */
 
-import { cpSync, existsSync, mkdirSync, readdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { createWriteStream } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFile, execFileSync } from 'node:child_process'
@@ -110,21 +109,14 @@ async function stagePython() {
   const requirements = Object.entries(manifest.python.packages)
     .map(([name, version]) => `${name}==${version}`).join('\n')
   writeFileSync(join(DESKTOP, 'requirements-desktop.txt'), requirements + '\n')
-  // uv python find 返回的是可执行文件路径，不是安装根——把安装目录定向到临时区，
-  // 再把 cpython 安装根整棵拷进 resources/python（python-build-standalone 可重定位）
-  const stage = mkdtempSync(join(tmpdir(), 'kw-python-'))
-  const installDir = join(stage, 'pyinstall')
-  run('uv', ['python', 'install', manifest.python.version], {
-    stdio: 'inherit',
-    env: { ...process.env, UV_PYTHON_INSTALL_DIR: installDir },
-  })
-  const entries = readdirSync(installDir)
-  const root = entries.find(entry => entry.startsWith('cpython-'))
-  if (root === undefined) throw new Error(`uv 的安装目录里没有 cpython-*：${entries.join(', ')}`)
-  cpSync(join(installDir, root), target, { recursive: true })
+  // CI 的 setup-uv 已把 3.12 装进 uv 的托管目录：uv python find 返回可执行文件路径，
+  // 反推安装根（darwin 是 bin/python3 的上两级；win 是 python.exe 的上一级）整树拷进
+  // resources/python（python-build-standalone 可重定位，含解释器与标准库）
+  const managed = execFileSync('uv', ['python', 'find', manifest.python.version], { encoding: 'utf8' }).trim()
+  const installRoot = platform === 'darwin' ? join(managed, '..', '..') : dirname(managed)
+  cpSync(installRoot, target, { recursive: true })
   const pythonBin = platform === 'win32' ? join(target, 'python.exe') : join(target, 'bin', 'python3')
   if (!existsSync(pythonBin)) throw new Error(`拷贝后的解释器不在期望位置：${pythonBin}`)
-  rmSync(stage, { recursive: true, force: true })
   // python-build-standalone 不自带 pip：用 uv 以它为解释器装清单
   run('uv', ['pip', 'install', '--python', pythonBin, '-r', join(DESKTOP, 'requirements-desktop.txt')], { stdio: 'inherit' })
   execFileSync(pythonBin, ['-c', 'import pandas, openpyxl, docx, pptx, matplotlib, markitdown'], { stdio: 'inherit' })

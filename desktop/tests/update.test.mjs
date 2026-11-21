@@ -53,6 +53,18 @@ test('下载一次；下载完成的事件到了就不再重复下', async () =>
   await done
 })
 
+test('setServer：feed 跟着换、下载标记重置后可从新 feed 再下', async () => {
+  const updater = stubUpdater()
+  const handle = createUpdater({ updater, server: 'https://kw' })
+  await handle.download()
+  updater.calls.splice(0)
+  handle.setServer('https://kw-2.example.com')
+  await handle.download()
+  const feeds = updater.calls.filter(c => c[0] === 'feed').map(c => c[1].url)
+  assert.equal(feeds.at(-1), 'https://kw-2.example.com/desktop/', 'feed 换到新服务地址')
+  assert.ok(updater.calls.filter(c => c[0] === 'download').length >= 1, '重置后能重新下载')
+})
+
 test('installAndRestart 与错误事件', async () => {
   const updater = stubUpdater()
   const states = []

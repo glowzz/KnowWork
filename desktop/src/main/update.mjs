@@ -38,8 +38,13 @@ export function createUpdater({ updater, server, log = () => {}, onUpdate = () =
   })
 
   return {
-    /** 服务地址变了（深链重连另一台服务器）：feed 跟着换，别一直指向旧地址。 */
+    /** 服务地址变了（深链重连另一台服务器）：feed 跟着换，并清掉旧服务器的下载状态——
+     * electron-updater 的「已下载待装」内部清不掉（autoInstallOnAppQuit 仍会装旧的），
+     * 所以这里同时重置本层标记，让 download() 可以从新 feed 重新取；旧包残余由
+     * electron-updater 自己的下一次下载覆盖，跨服务器误装的残余风险记录在此。 */
     setServer(origin) {
+      downloading = false
+      downloaded = false
       updater.setFeedURL({ provider: 'generic', url: `${origin}/desktop/` })
     },
     check() {
