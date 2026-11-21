@@ -159,7 +159,7 @@ resources/     node/、python/（uv + 与 sandbox.Dockerfile 同一份钉版清�
 1. ~~模型网关的对外位置~~：**不需要了**——开源侧在登记原生应用时已经把模型网关挂到公开入口
    `/api/model/v1`（`app.py` 的 `router_from_settings(..., path_prefix=PUBLIC_PREFIX)`），走 `/api/` 现有转发，
    令牌校验不变（model 受众的交换器也是开源自动登记的）。M2 落地时确认，见第 10.2 节。
-2. **打包脚本**：`scripts/` 里加一个交付包整理脚本（安装包 + 更新清单 → `html/desktop/<版本>/`），
+2. **打包脚本**：`scripts/` 里加一个交付包整理脚本（安装包 + 更新清单 → `html/desktop/` 的 feed 根），
    对应「解开放进部署目录，不用重启」。
 3. **Python 清单一致性测试**（新增，不改 Dockerfile）：核对桌面 resources 的 Python/Node/LibreOffice 版本
    与 `deploy/docker/sandbox.Dockerfile` 的一致，上游升版本时变红提醒同步。
@@ -367,7 +367,7 @@ git merge upstream/main --no-ff # 跟着上游发版同步
 | 等人提示 | `desktop/src/main/notify.mjs` | `approval/asked`/`question/requested` 且窗口不在前台才叫，同一项不重复；前台看过没处理，走开会再提醒一次 |
 | 胶水接线 | `desktop/src/main/index.mjs`、`preload` | 登录后后台拉起宿主（模型受众令牌随 env + 到期轮换）、`knowwork:start-conversation/send/cancel/decide/answer/delete/set-access/get-access/access-catalog/can-continue/place/pick-folder` 一组桥、通知弹窗与任务栏闪烁 |
 | 扩展前端包 | `extensions/desktop/web/src/` | `chat.sources` 登记「本机」来源（工作文件夹 Picker、三档 Controls、useBlocker、start/actions 全走桥）、`chat.place` 登记设备名提示；`KNOWWORK_WEB_EXTENSIONS` 指到 `extensions/desktop/web/src/index.ts` 即随网页版构建 |
-| 验证 | `desktop/tests/`（38 个用例，当时口径）+ 真机冒烟 `desktop/scripts/smoke-real-host.mjs` | 托管/客户端/中继/编排/通知全过；真机冒烟用托管模块起真实 DSH 设备宿主 + 官方模拟模型服务（就绪、health、三档预设全在）；带扩展入口的网页版构建通过 |
+| 验证 | `desktop/tests/`（38 个用例，当时口径）+ 真机冒烟 `desktop/scripts/smoke-real-host.mjs` | | 托管/客户端/中继/编排/通知全过；真机冒烟用托管模块起真实 DSH 设备宿主 + 官方模拟模型服务（就绪、health、三档预设全在）；带扩展入口的网页版构建通过 |
 
 ### 12.2 实现决定
 
@@ -418,11 +418,11 @@ git merge upstream/main --no-ff # 跟着上游发版同步
 
 | 部分 | 位置 | 内容 |
 |---|---|---|
-| 清单与一致性 | `desktop/resources-manifest.json` + `tests/manifest.test.mjs` | Python 库/Node 库/LibreOffice/DSH 版本与 `sandbox.Dockerfile`、`runtime-host` 核对——落地当天就抓到 DSH 已挪 rc.5 |
+| 清单与一致性 | `desktop/resources-manifest.json` + `desktop/tests/manifest.test.mjs` | Python 库/Node 库/LibreOffice/DSH 版本与 `sandbox.Dockerfile`、`runtime-host` 核对——落地当天就抓到 DSH 已挪 rc.5 |
 | 自动更新 | `desktop/src/main/update.mjs` | electron-updater 的 generic provider 指到网关 `/desktop/`：有新版只提示、下载完成装在退出时（需求原话）；弹窗点击即装并重启 |
 | 打包配置 | `desktop/electron-builder.yml` | extraResources：`runtime-host` 树（prune 后）、自带 Node（24.9+）、Python、LibreOffice；Mac arm64 / Win x64 |
 | 准备脚本 | `desktop/scripts/prepare-runtime.mjs` | 按平台备齐 resources/：拷 runtime-host 树（npm prune）、从 nodejs.org 拉独立 Node、Python/LibreOffice 按 manifest 装配（CI 里 KNOWWORK_OFFICE_DIR 指向免安装目录）；本机已验证 darwin 段跑通（node 199M、runtime-host 674M） |
-| 交付脚本 | `desktop/scripts/build-delivery.mjs` | electron-builder 产物 + 更新清单 → `deploy/html/desktop/<版本>/` + manifest.json（版本、文件、sha256）——网关 `/desktop/` 现成位置，不用重启服务 |
+| 交付脚本 | `desktop/scripts/build-delivery.mjs` | electron-builder 产物 + 更新清单 → `deploy/html/desktop/`（feed 根）+ manifest.json（版本、文件、sha256）——`latest*.yml` 与安装包必须直接放在 `/desktop/` 根（generic provider 的 URL 固定），不用重启服务 |
 | CI | `.github/workflows/desktop.yml` | macos-latest（arm64）/ windows-latest（x64）矩阵：装依赖 → 测试 → prepare → electron-builder → 传产物 |
 | 镜像接线 | `deploy/docker/server.Dockerfile` | 构建参数 `KNOWWORK_BUILD_DESKTOP=1` 才装桌面端扩展（装在最后一次 `uv sync` 之后——sync 会把 venv 修剪回锁内；没装的开源部署不受影响） |
 
@@ -440,7 +440,7 @@ git merge upstream/main --no-ff # 跟着上游发版同步
 
 ### 14.3 全里程碑小结
 
-- 桌面壳 58/58（审查修复后；含清单一致性 7、更新 3）、扩展包 13/13、真机冒烟（真实 DSH + 官方模拟模型服务）、
+- 桌面壳 58/58（含清单一致性 7、更新 3）、扩展包 13/13、真机冒烟（真实 DSH + 官方模拟模型服务）、
   带扩展入口的网页版构建、electron-builder --dir 冒烟，全绿。
 - 剩余要真机做的：mac/win 构建机出安装包（CI 就位后一键）、壳内连真实部署的端到端联调（12.3 的
   验收路径）、安装包签名（现在按未签名指引放行）。

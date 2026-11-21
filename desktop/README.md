@@ -77,6 +77,6 @@ npx electron-builder --mac --arm64 | --win --x64           # 出安装包（未�
 node scripts/build-delivery.mjs                            # 安装包 + 更新清单 → deploy/html/desktop/（feed 根）
 ```
 
-CI（`.github/workflows/desktop.yml`，手动触发）在 mac/win 构建机上跑 prepare 与 electron-builder
-并上传产物；交付包整理（build-delivery.mjs）是人工步骤。版本清单见 `desktop/resources-manifest.json`
-（与沙箱镜像的一致性由 `desktop/tests/manifest.test.mjs` 钉着）。
+CI（`.github/workflows/desktop.yml`，手动触发）在 mac/win 构建机上跑：装依赖 → npm test → prepare →
+electron-builder → 上传产物；交付包整理（build-delivery.mjs）是人工步骤。版本清单见
+`desktop/resources-manifest.json`（与沙箱镜像的一致性由 `desktop/tests/manifest.test.mjs` 钉着）。
