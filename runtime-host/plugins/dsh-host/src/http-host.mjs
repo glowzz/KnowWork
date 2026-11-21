@@ -6,6 +6,7 @@
  * 同官方一样：同一会话「已打开或正在打开」时拒绝再开；等整棵插件树就绪后才对外服务；
  * 关闭时先拒新请求、等正在打开的会话、排空子 Agent，再释放。
  * 区别只在传输：官方是 stdio JSON-RPC，这里是带令牌的 HTTP，事件流为 NDJSON。
+ * 合同本身（开会话、每一轮的请求体）怎么收在 intake.mjs，用户设备上的本机宿主收同一份；这里只管 HTTP 与 Agent 的生灭。
  * 空闲会话定时释放（见 idle-sessions.mjs），业务服务下次发消息走恢复流程。
  *
  * 业务服务是唯一调用方；宿主只监听内网地址，缺令牌或令牌太短直接拒绝启动。
@@ -15,18 +16,17 @@ import { createServer } from 'node:http'
 import { createRequire } from 'node:module'
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { brandString } from '@deepseek-ai/dsh-brand'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { credentialRef } from '@deepseek-ai/dsh-credentials'
-import { AnswerError, checkAnswer, parseAnswer } from './question-answers.mjs'
-import { attachmentBlocks, attachmentsOf } from './attachment-handles.mjs'
-import { sessionRoot } from './sandbox-client.mjs'
-import { EPOCH, createSession, dropSession, framesAfter, getSession, oldestCursor, publish, publishLive } from './state.mjs'
+import { createAnswers } from './answers.mjs'
+import { hostMount } from './workpath.mjs'
+import { EPOCH, dropSession, framesAfter, getSession, oldestCursor, publish, publishLive } from './state.mjs'
 import { createIdleTracker, idleMsOf, releasable, sweepMsOf } from './idle-sessions.mjs'
 import { bundledCandidates } from './bundled-skills.mjs'
-import { catalogOf } from './knowledge-catalog.mjs'
-import { mentionBlocks, mentionsOf } from './mentions.mjs'
-import { receiveTurnContext, turnContextOf } from './turn-context.mjs'
-import { BUILT_IN_MODES, MODE_PATTERN, answerModeSpecOf } from './answer-mode.mjs'
+
+import { deploymentTimeZone } from './message-source.mjs'
+import { liveFrame } from './live-frame.mjs'
+import { createModelCatalog, modelListOf } from './model-catalog.mjs'
+import { HostError as HttpError, checkSessionId, createTurnIntake, provision, requireString, sessionContractOf, toolTokenOf } from './intake.mjs'
 
 // DSH 版本号随 /health 一起报给业务服务，系统信息页显示（所有 @deepseek-ai 包锁在同一版本）
 const DSH_VERSION = createRequire(import.meta.url)('@deepseek-ai/dsh/package.json').version
@@ -38,16 +38,7 @@ const HEARTBEAT_MS = 2000
 const CANCEL_SETTLE_MS = 5000
 const MAX_BODY_BYTES = 1024 * 1024
 const MAX_SUBSCRIBERS_PER_SESSION = 8
-const SESSION_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,128}$/
 const CREDENTIAL_ACTIONS = new Set(['tool-credential', 'skill-credential'])
-
-class HttpError extends Error {
-  constructor(status, code, message) {
-    super(message)
-    this.status = status
-    this.code = code
-  }
-}
 
 const digest = value => createHash('sha256').update(value).digest()
 
@@ -77,13 +68,6 @@ function send(res, status, body) {
   res.end(JSON.stringify(body))
 }
 
-function requireString(value, field) {
-  if (typeof value !== 'string' || value.length === 0) {
-    throw new HttpError(400, 'invalid_request', `缺少字段 ${field}`)
-  }
-  return value
-}
-
 function sessionIdOf(raw) {
   let id
   try {
@@ -91,18 +75,7 @@ function sessionIdOf(raw) {
   } catch {
     throw new HttpError(400, 'invalid_request', '路径参数编码错误')
   }
-  if (!SESSION_ID_PATTERN.test(id)) throw new HttpError(400, 'invalid_request', 'sessionId 只允许字母、数字和 _.:-，最长 128')
-  return id
-}
-
-/** 回答校验不通过统一成 400 invalid_answer，原因写进 message（业务服务只记日志，不给用户看）。 */
-function validated(check) {
-  try {
-    return check()
-  } catch (error) {
-    if (error instanceof AnswerError) throw new HttpError(400, 'invalid_answer', error.message)
-    throw error
-  }
+  return checkSessionId(id)
 }
 
 function segmentOf(raw) {
@@ -111,38 +84,6 @@ function segmentOf(raw) {
   } catch {
     throw new HttpError(400, 'invalid_request', '路径参数编码错误')
   }
-}
-
-function policyOf(raw) {
-  if (raw === undefined) return {}
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new HttpError(400, 'invalid_request', 'policy 必须是对象')
-  const policy = {}
-  if (raw.deny !== undefined) {
-    if (!Array.isArray(raw.deny) || raw.deny.some(n => typeof n !== 'string')) throw new HttpError(400, 'invalid_request', 'policy.deny 必须是字符串数组')
-    policy.deny = [...raw.deny]
-  }
-  if (raw.gate !== undefined) {
-    const { requiredTool, maxNudges } = raw.gate ?? {}
-    if (requiredTool !== undefined) requireString(requiredTool, 'policy.gate.requiredTool')
-    if (maxNudges !== undefined && !(Number.isInteger(maxNudges) && maxNudges >= 0 && maxNudges <= 5)) {
-      throw new HttpError(400, 'invalid_request', 'policy.gate.maxNudges 必须是 0 到 5 的整数')
-    }
-    policy.gate = { ...(requiredTool === undefined ? {} : { requiredTool }), ...(maxNudges === undefined ? {} : { maxNudges }) }
-  }
-  return policy
-}
-
-/** 回调令牌：工具桥（受众 tools）与技能提供方（受众 skills）各一个，业务服务签发。宿主只转交，不解读。 */
-function accessOf(raw, field) {
-  if (raw === undefined) return undefined
-  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new HttpError(400, 'invalid_request', `${field} 必须是对象`)
-  return { token: toolTokenOf(raw.token, `${field}.token`) }
-}
-
-function toolTokenOf(value, field) {
-  requireString(value, field)
-  if (value.length < 32 || value.length > 4096) throw new HttpError(400, 'invalid_request', `${field} 长度不合法`)
-  return value
 }
 
 /**
@@ -165,6 +106,14 @@ export function apply(ctx, config) {
     model: config.model ?? process.env.KNOWWORK_MODEL ?? 'default',
   }
   const modelTokenRef = config.modelTokenRef ?? process.env.KNOWWORK_MODEL_TOKEN_REF ?? 'KNOWWORK_MODEL_TOKEN'
+  // 可选的对话模型（model-catalog.mjs）：业务服务推清单，会话按官方 agent.model.select 选
+  const models = createModelCatalog(ctx, {
+    entryId: config.modelEntry ?? process.env.KNOWWORK_MODEL_ENTRY ?? 'llm-knowwork-gateway',
+    provider: agentOptions.provider,
+    defaultModel: agentOptions.model,
+  })
+  // 收一轮（intake.mjs）：消息没带用户时区时用部署时区（见 message-source.mjs）
+  const receiveTurn = createTurnIntake({ models, provider: agentOptions.provider, fallbackTimeZone: deploymentTimeZone() })
 
   /** @type {Map<string, import('@deepseek-ai/dsh-agent').AgentHandle>} */
   const handles = new Map()
@@ -184,7 +133,7 @@ export function apply(ctx, config) {
     publish(sessionId, 'agent/status', { status })
   })
   // 逐字输出：官方 dsh-agent-loop 的 agent/assistant-stream（官方会话接口 dsh-api-session-controller、
-  // 命令行运行 dsh-headless 都订阅它出字）。转正文片段，和模型开始写某个工具调用时的工具名，作为临时帧推给当前订阅方；
+  // 命令行运行 dsh-headless 都订阅它出字）。转正文与思考片段，和模型开始写某个工具调用时的工具名，作为临时帧推给当前订阅方；
   // 这一步的正式消息照常落成会话事件，业务服务拿它整段替换。子 Agent 的会话不是宿主打开的，查不到就丢。
   const announced = new Map() // 每次输出里已经报过名字的工具调用（attemptId → 序号）：参数片段很多，名字只报一次
   ctx.on('agent/assistant-stream', ({ agent, frame }) => {
@@ -202,28 +151,21 @@ export function apply(ctx, config) {
 
   async function openSession(body) {
     if (shuttingDown) throw new HttpError(503, 'shutting_down', '宿主正在关闭')
-    const sessionId = sessionIdOf(requireString(body.sessionId, 'sessionId'))
-    const resume = body.resume === true
-    if (resume && body.policy === undefined) {
-      throw new HttpError(400, 'policy_required', '恢复会话必须重新给出 policy，宿主不保存策略')
-    }
+    const contract = sessionContractOf(body)
+    const { sessionId, resume } = contract
     if (handles.has(sessionId) || opening.has(sessionId) || closing.has(sessionId) || getSession(sessionId) !== undefined) {
       throw new HttpError(409, 'session_busy', `会话已打开、正在打开或正在释放：${sessionId}`)
     }
-    const policy = policyOf(body.policy)
-    const toolAccess = accessOf(body.tools, 'tools')
-    const skillAccess = accessOf(body.skills, 'skills')
-    const state = createSession(sessionId, policy)
-    state.toolAccess = toolAccess
-    state.skillAccess = skillAccess
+    const state = provision(contract)
     const id = brandString(sessionId)
     const task = resume
       ? ctx.agents.resume({ resumeSessionId: id, agentOptions })
-      : ctx.agents.create({ sessionId: id, meta: { cwd: sessionRoot(sessionId) }, agentOptions })
+      : ctx.agents.create({ sessionId: id, meta: { cwd: hostMount(sessionId).root }, agentOptions })
     opening.set(sessionId, task)
     try {
       const handle = await task
       handles.set(sessionId, handle)
+      state.agent = handle.agent
       idle.touch(sessionId)
       return { sessionId, status: handle.agent.status, epoch: EPOCH }
     } catch (error) {
@@ -236,50 +178,21 @@ export function apply(ctx, config) {
   }
 
   function sendMessage(sessionId, body) {
-    const agent = liveAgent(sessionId)
-    const text = requireString(body.text, 'text')
-    const mode = body.mode ?? 'followup'
-    if (mode !== 'followup' && mode !== 'steer') throw new HttpError(400, 'invalid_request', 'mode 只能是 followup 或 steer')
-    const language = body.language
-    if (language !== undefined && language !== 'zh' && language !== 'en') {
-      throw new HttpError(400, 'invalid_request', 'language 只能是 zh 或 en')
-    }
-    const answerMode = body.answerMode ?? 'agent'
-    if (typeof answerMode !== 'string' || !MODE_PATTERN.test(answerMode)) {
-      throw new HttpError(400, 'invalid_request', 'answerMode 格式不对')
-    }
-    // 扩展登记的回答方式随消息带上放行的官方工具与指令（answer-mode）；内置的两种宿主自己认得
-    let answerModeSpec
-    if (!BUILT_IN_MODES.has(answerMode)) {
-      try {
-        answerModeSpec = answerModeSpecOf(body.answerModeSpec)
-      } catch (error) {
-        throw new HttpError(400, 'invalid_request', error.message)
-      }
-    }
-    let files
-    let knowledge
-    let mentions
-    let context
+    return receiveTurn(liveAgent(sessionId), getSession(sessionId), body)
+  }
+
+  async function syncModels(body) {
     try {
-      files = attachmentsOf(body.attachments)
-      knowledge = catalogOf(body.knowledge)
-      mentions = mentionsOf(body.mentions)
-      context = turnContextOf(body.context)
+      modelListOf(body.models)
     } catch (error) {
       throw new HttpError(400, 'invalid_request', error.message)
     }
-    const state = getSession(sessionId)
-    if (state !== undefined && language !== undefined) state.language = language
-    if (state !== undefined && knowledge !== undefined) state.knowledgeCatalog = knowledge
-    const content = [{ type: 'text', text }, ...attachmentBlocks(files), ...mentionBlocks(mentions)]
-    const message = createUserMessage({ content, source: { kind: 'user' } })
-    // 回答方式等这条消息进入步骤时才生效（answer-mode）：排队到下一轮的消息不改正在跑的这一轮
-    state?.answerModes.set(String(message.id), { mode: answerMode, spec: answerModeSpec })
-    receiveTurnContext(state, message.id, context)
-    if (mode === 'steer') agent.steer(message)
-    else agent.followup(message)
-    return { messageId: message.id, mode }
+    try {
+      return await models.sync(body.models)
+    } catch (error) {
+      log.warn('syncing models failed: %s', error instanceof Error ? error.stack : String(error))
+      throw new HttpError(503, 'models_unavailable', '模型清单没能更新，详情见宿主日志')
+    }
   }
 
   async function cancel(sessionId) {
@@ -371,71 +284,8 @@ export function apply(ctx, config) {
     return { rotated: true }
   }
 
-  function listApprovals(sessionId) {
-    const state = getSession(sessionId)
-    if (state === undefined) throw new HttpError(404, 'session_not_found', `会话不存在：${sessionId}`)
-    return [...state.approvals.values()].map(({ id, sessionId: from, toolName, callId, reason }) => ({ id, sessionId: from, toolName, callId, reason }))
-  }
-
-  function decide(sessionId, approvalId, body) {
-    const pending = getSession(sessionId)?.approvals.get(approvalId)
-    if (pending === undefined) throw new HttpError(404, 'approval_not_found', `审批不存在或已结束：${approvalId}`)
-    const outcome = body.outcome
-    if (outcome !== 'allowed-once' && outcome !== 'rejected') {
-      throw new HttpError(400, 'invalid_request', 'outcome 只能是 allowed-once 或 rejected')
-    }
-    pending.resolve(outcome)
-    return { approvalId, outcome }
-  }
-
-  /** 官方 userQuestions 投影里本会话还能回答、但已不在前台等待的问题（等待到期、或宿主重启前没答完）。 */
-  function continuedQuestions(agent) {
-    const view = ctx.get('sessionProjections')?.stateOf(agent.session, 'userQuestions')
-    return (view?.questions.active ?? []).filter(question => question.state === 'continued')
-  }
-
-  /** 待答问题：前台等待中的（open）在前，已转入 continued 的在后。会话没在运行时只看得到前者。 */
-  function listQuestions(sessionId) {
-    const state = getSession(sessionId)
-    if (state === undefined) throw new HttpError(404, 'session_not_found', `会话不存在：${sessionId}`)
-    const open = [...state.questions.values()].map(({ id, sessionId: from, questions, timed }) => ({ id, sessionId: from, questions, timed, state: 'open' }))
-    const handle = handles.get(sessionId)
-    const continued = handle === undefined ? [] : continuedQuestions(handle.agent)
-      .filter(question => !state.questions.has(String(question.callId)))
-      .map(question => ({ id: String(question.callId), sessionId, questions: question.questions, timed: true, state: 'continued' }))
-    return [...open, ...continued]
-  }
-
-  /**
-   * 提交回答。前台等待中的问题直接交回；已转入 continued 的经官方 `userQuestions.answer` 以
-   * user-question-reply 消息送回 agent（空闲时会开新一轮）。
-   */
-  function answerQuestion(sessionId, questionId, body) {
-    const answer = validated(() => parseAnswer(body))
-    const pending = getSession(sessionId)?.questions.get(questionId)
-    if (pending !== undefined) {
-      validated(() => checkAnswer(pending.questions, answer))
-      pending.answer(answer)
-      return { questionId, state: 'answered' }
-    }
-    const agent = liveAgent(sessionId)
-    const service = ctx.get('userQuestions')
-    const question = continuedQuestions(agent).find(item => String(item.callId) === questionId)
-    if (service === undefined || question === undefined) {
-      throw new HttpError(404, 'question_not_found', `问题不存在或已结束：${questionId}`)
-    }
-    validated(() => checkAnswer(question.questions, answer))
-    let accepted
-    try {
-      accepted = service.answer(agent, question.callId, answer)
-    } catch (error) {
-      if (error?.code === 'REPLY_QUEUED') throw new HttpError(409, 'reply_queued', '这个问题的回答已在排队，等 Agent 接收')
-      if (error?.code === 'BAD_ANSWER') throw new HttpError(400, 'invalid_answer', '每个问题都要有一条回答')
-      throw error
-    }
-    if (!accepted) throw new HttpError(404, 'question_not_found', `问题不存在或已结束：${questionId}`)
-    return { questionId, state: 'queued' }
-  }
+  // 审批与提问的决定经业务服务交来，收法和本机宿主经主进程收的是同一份（answers.mjs）
+  const answers = createAnswers(ctx, { agentOf: liveAgent })
 
   /**
    * 宿主自带的技能：业务服务的「技能」页、@ 菜单与「公共与自带」页要列出来，业务服务自己不知道有哪些。
@@ -459,6 +309,7 @@ export function apply(ctx, config) {
 
     if (req.method === 'POST' && path === '/v1/sessions') return send(res, 201, await openSession(await readJson(req)))
     if (req.method === 'PUT' && path === '/v1/model-credential') return send(res, 200, await rotateModelCredential(await readJson(req)))
+    if (req.method === 'PUT' && path === '/v1/models') return send(res, 200, await syncModels(await readJson(req)))
     if (req.method === 'GET' && path === '/v1/skills/bundled') return send(res, 200, bundledSkills())
 
     const match = /^\/v1\/sessions\/([^/]+)(?:\/([^/]+)(?:\/([^/]+))?)?$/.exec(path)
@@ -478,13 +329,14 @@ export function apply(ctx, config) {
     if (req.method === 'PUT' && action === 'tool-credential') return send(res, 200, rotateAccess(sessionId, await readJson(req), 'toolAccess'))
     if (req.method === 'PUT' && action === 'skill-credential') return send(res, 200, rotateAccess(sessionId, await readJson(req), 'skillAccess'))
     if (req.method === 'GET' && action === 'events') return streamEvents(sessionId, url, req, res)
-    if (req.method === 'GET' && action === 'approvals' && sub === undefined) return send(res, 200, listApprovals(sessionId))
+    if (req.method === 'GET' && action === 'approvals' && sub === undefined) return send(res, 200, answers.listApprovals(sessionId))
     if (req.method === 'POST' && action === 'approvals' && sub !== undefined) {
-      return send(res, 200, decide(sessionId, segmentOf(sub), await readJson(req)))
+      const body = await readJson(req)
+      return send(res, 200, await answers.decide(sessionId, segmentOf(sub), body?.outcome))
     }
-    if (req.method === 'GET' && action === 'questions' && sub === undefined) return send(res, 200, listQuestions(sessionId))
+    if (req.method === 'GET' && action === 'questions' && sub === undefined) return send(res, 200, answers.listQuestions(sessionId))
     if (req.method === 'POST' && action === 'questions' && sub !== undefined) {
-      return send(res, 200, answerQuestion(sessionId, segmentOf(sub), await readJson(req)))
+      return send(res, 200, answers.answerQuestion(sessionId, segmentOf(sub), await readJson(req)))
     }
     throw new HttpError(404, 'not_found', '路径不存在')
   }
@@ -565,29 +417,4 @@ export function apply(ctx, config) {
   }, 'knowwork.http-host')
 }
 
-/**
- * 官方逐字帧 → 转给业务服务的样子：开始（带轮次、步）、正文片段、开始写某个工具调用（只报一次工具名）、结束。
- * 思考与工具参数的片段不转：模型把整个文件写进 write 的参数时要好十几秒，这期间页面只能写「思考中」、点开什么都没有，
- * 看着像卡住了；报一次工具名，页面就能写「正在写文件」。参数本身不转（量大，半截的参数也没法给人看）。
- * @param {{ type: string, attemptId?: string, turn?: number, step?: number,
- *   chunk?: { type: string, text?: string, index?: number, name?: string } }} frame
- * @param {Map<string, Set<number>>} announced
- */
-export function liveFrame(frame, announced) {
-  if (frame.type === 'start') return { type: 'start', attemptId: frame.attemptId, turn: frame.turn, step: frame.step }
-  if (frame.type === 'end') {
-    announced.delete(frame.attemptId)
-    return { type: 'end', attemptId: frame.attemptId }
-  }
-  const chunk = frame.type === 'chunk' ? frame.chunk : undefined
-  if (chunk?.type === 'text-delta' && typeof chunk.text === 'string') {
-    return { type: 'text', attemptId: frame.attemptId, text: chunk.text }
-  }
-  if (chunk?.type === 'tool-call-delta' && typeof chunk.name === 'string' && chunk.name) {
-    const seen = announced.get(frame.attemptId) ?? new Set()
-    if (seen.has(chunk.index)) return undefined
-    announced.set(frame.attemptId, seen.add(chunk.index))
-    return { type: 'tool', attemptId: frame.attemptId, name: chunk.name }
-  }
-  return undefined
-}
+export { liveFrame }

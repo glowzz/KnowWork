@@ -14,11 +14,12 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from ..access.models import Workspace
 from ..conversations.models import Conversation, RunEvent
 from ..db.base import in_workspace
-from .models import Channel, ChannelSession
+from .models import Channel, ChannelSession, ChannelStranger
 
 MAX_ERROR = 500
 MAX_NAME = 100
 MAX_SESSIONS = 200
+WEB = "web"  # 网页渠道的接入方式（channel.platform）
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,16 @@ class SessionRow:
     conversation_id: str
     title: str
     updated_at: datetime
+    user_id: str = ""
+
+
+@dataclass(frozen=True)
+class StrangerRow:
+    external_id: str
+    display_name: str
+    reason: str
+    attempts: int
+    last_at: datetime
 
 
 class ChannelStore:
@@ -58,6 +69,19 @@ class ChannelStore:
         async with self._sessionmaker() as session:
             return (await session.scalars(select(Channel).where(
                 Channel.workspace_id == workspace_id, Channel.id == channel_id))).first()
+
+    async def by_web_key(self, workspace_id: str, web_key: str) -> Channel | None:
+        """网页渠道按发布令牌找（令牌里带着空间，调用方先进到那个空间）。"""
+        async with self._sessionmaker() as session:
+            return (await session.scalars(select(Channel).where(
+                Channel.workspace_id == workspace_id, Channel.platform == WEB,
+                Channel.public_config["web_key"].astext == web_key))).first()
+
+    async def channel_of_conversation(self, workspace_id: str, conversation_id: str) -> str | None:
+        """这段会话是从哪个渠道来的；不是从渠道来的为空。"""
+        async with self._sessionmaker() as session:
+            return await session.scalar(select(Conversation.channel_id).where(
+                Conversation.workspace_id == workspace_id, Conversation.id == conversation_id))
 
     async def create(self, channel: Channel) -> Channel:
         channel.id = channel.id or f"ch_{uuid.uuid4().hex[:20]}"
@@ -121,11 +145,42 @@ class ChannelStore:
         async with self._sessionmaker() as session:
             rows = (await session.execute(
                 select(ChannelSession.session_key, ChannelSession.display_name, ChannelSession.conversation_id,
-                       Conversation.title, ChannelSession.updated_at)
+                       Conversation.title, ChannelSession.updated_at, ChannelSession.user_id)
                 .join(Conversation, Conversation.id == ChannelSession.conversation_id)
                 .where(ChannelSession.workspace_id == workspace_id, ChannelSession.channel_id == channel_id)
                 .order_by(ChannelSession.updated_at.desc()).limit(limit))).all()
         return [SessionRow(*row) for row in rows]
+
+    # ---- 没认出的人 ----
+
+    async def stranger(self, workspace_id: str, channel_id: str, external_id: str, display_name: str,
+                       reason: str) -> None:
+        """记下私聊了却没认出来的人：同一个人再来只加次数、更新原因与时间。"""
+        name = display_name[:MAX_NAME]
+        statement = insert(ChannelStranger).values(channel_id=channel_id, external_id=external_id[:255],
+                                                   workspace_id=workspace_id, display_name=name, reason=reason,
+                                                   attempts=1)
+        async with self._sessionmaker() as session, session.begin():
+            await session.execute(statement.on_conflict_do_update(
+                index_elements=["channel_id", "external_id"],
+                set_={"display_name": name, "reason": reason, "attempts": ChannelStranger.attempts + 1,
+                      "last_at": func.now()}))
+
+    async def recognized(self, workspace_id: str, channel_id: str, external_id: str) -> None:
+        """认出来了：从没认出的人里删掉。"""
+        async with self._sessionmaker() as session, session.begin():
+            await session.execute(delete(ChannelStranger).where(
+                ChannelStranger.workspace_id == workspace_id, ChannelStranger.channel_id == channel_id,
+                ChannelStranger.external_id == external_id))
+
+    async def strangers(self, workspace_id: str, channel_id: str, limit: int = MAX_SESSIONS) -> list[StrangerRow]:
+        async with self._sessionmaker() as session:
+            rows = (await session.execute(
+                select(ChannelStranger.external_id, ChannelStranger.display_name, ChannelStranger.reason,
+                       ChannelStranger.attempts, ChannelStranger.last_at)
+                .where(ChannelStranger.workspace_id == workspace_id, ChannelStranger.channel_id == channel_id)
+                .order_by(ChannelStranger.last_at.desc()).limit(limit))).all()
+        return [StrangerRow(*row) for row in rows]
 
     async def session_counts(self, workspace_id: str) -> dict[str, int]:
         async with self._sessionmaker() as session:

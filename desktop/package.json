@@ -1,0 +1,21 @@
+{
+  "name": "knowwork-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "description": "KnowWork 桌面端：内嵌网页版的外壳（深链连接、系统浏览器登录、本机宿主托管）。纯逻辑模块零依赖、零构建（同 runtime-host），Electron 胶水单独隔离",
+  "main": "src/main/index.mjs",
+  "type": "module",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test --test-timeout=60000 tests/*.test.mjs",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^37.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.11"
+  },
+  "author": "KnowWork"
+}

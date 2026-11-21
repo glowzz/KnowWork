@@ -2,7 +2,8 @@
  * 宿主内各插件共享的会话状态。同一进程内由 Node 模块缓存保证单例。
  *
  * 规则：
- * - 只有 HTTP 驱动打开会话时能建状态（createSession）；其他插件只读（getSession）。
+ * - 只按业务服务的开会话合同建状态（intake.mjs 的 provision）：服务端宿主上是 HTTP 驱动打开会话前建；用户设备上的本机宿主
+ *   （会话由官方会话控制器建与恢复）由它的收件入口在官方 agent/created 时建。其他插件只读（getSession）。
  * - 删除按对象身份进行：只删调用方当时拿到的那份，避免旧会话的收尾删掉同 id 的新会话。
  * - 会话已删除后到达的事件直接丢弃，不重建状态。
  * - 只存运行期数据，持久事实在业务服务。
@@ -57,16 +58,26 @@ const BUFFER_BYTES = 8 * 1024 * 1024
  * @property {Promise<readonly object[]> | undefined} skillCatalogPromise 清单拉取（只拉一次）
  * @property {Set<string>} loadedSkills 本会话（含子 Agent）加载过的技能：执行命令时报给业务服务，由它加上这些技能的环境变量。
  *   只在内存里，宿主重启后会话恢复时为空，技能再加载一次才带上
+ * @property {Readonly<Record<string, string>>} skillEnv 本机执行时加进命令的技能环境变量：只有用户电脑上的本机宿主取
+ *   （技能提供方的 deliverEnv），只有个人技能的值；服务端宿主不取，值在业务服务的沙箱执行接口里加
  * @property {readonly string[] | undefined} bundledOff 本空间停用了的自带技能（随清单拿到）
  * @property {'zh' | 'en' | undefined} language 最近一轮的交互语言，由业务服务随消息下发
  * @property {{ bases: readonly object[], omitted: number } | undefined} knowledgeCatalog 最近一次下发的知识库目录
  * @property {string | undefined} turnContext 扩展补的常驻上下文（turn-context），最近一次下发的；空串是「现在没有」
+ * @property {string | undefined} persona 扩展给这段对话的身份（turn-context），最近一次下发的；空串是照部署人设
+ * @property {string | undefined} personaShown 系统提示里现在放着的那份身份（换了才重新注册）
+ * @property {(() => void) | undefined} personaOff 撤掉系统提示里那份身份
  * @property {Map<string, string>} turnTexts 已收下、还没进入步骤的消息各自带的这一轮上下文，键是消息 id
+ * @property {Record<string, unknown> | undefined} extensionState 扩展随最近一轮交来的状态（按扩展名分，业务服务
+ *   conversations/turn_state.py 算、用户设备上执行的由设备补），扩展自己的宿主插件读；这一轮没带就沿用上一轮的
  * @property {string} answerMode 当前步骤按哪种回答方式（answer-mode）：agent、quick 或扩展登记的；随消息进入步骤切换
  * @property {{ tools: string[], prompt: string } | undefined} answerModeSpec 扩展登记的回答方式随消息带来的放行清单与指令
  * @property {(() => void) | undefined} modeMask 当前回答方式对官方全局工具的收窄（restrict 的撤销函数）
  * @property {Map<string, { mode: string, spec: { tools: string[], prompt: string } | undefined }>} answerModes
  *   已收下、还没进入步骤的消息各自的回答方式，键是消息 id
+ * @property {{ workspaceId: string, userId: string } | undefined} owner 这段对话的属主（业务服务打开会话时给）：多用户适配层
+ *   （multi-user/）据此记录、过滤属主级资源；旧版业务服务不给时是 undefined，属主级插件对这个会话不可用
+ * @property {object | undefined} agent 宿主打开的活 Agent（http-host 打开后填）：属主级插件到点激活会话时从这里取
  */
 
 /** @type {Map<string, SessionState>} */
@@ -91,14 +102,22 @@ export function createSession(sessionId, policy) {
     skillCatalog: undefined,
     skillCatalogPromise: undefined,
     loadedSkills: new Set(),
+    skillEnv: Object.freeze({}),
     language: undefined,
+    timeZone: undefined, // 最近一条用户消息上的时区，子 Agent 沿用（subagent-policy）
     knowledgeCatalog: undefined,
     turnContext: undefined,
+    extensionState: undefined,
+    persona: undefined,
+    personaShown: undefined,
+    personaOff: undefined,
     turnTexts: new Map(),
     answerMode: 'agent',
     answerModeSpec: undefined,
     modeMask: undefined,
     answerModes: new Map(),
+    owner: undefined,
+    agent: undefined,
   }
   sessions.set(sessionId, state)
   return state

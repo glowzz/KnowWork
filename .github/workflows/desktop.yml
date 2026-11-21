@@ -1,0 +1,96 @@
+# 桌面端的打包 CI：Mac（Apple 芯片）与 Windows（x64）两包，未签名；产物上传后人工整理成交付包
+# （desktop/scripts/build-delivery.mjs 的口径）。DSh/Node/Python/LibreOffice 的版本钉在
+# desktop/resources-manifest.json（tests/manifest.test.mjs 与沙箱镜像核对）。
+name: desktop
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            platform: darwin
+          - os: windows-latest
+            platform: win32
+    runs-on: ${{ matrix.os }}
+    env:
+      LO_VERSION: 25.2.5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # 本机宿主的运行时（runtime-host）：生产依赖
+      - name: Install runtime-host dependencies
+        working-directory: runtime-host
+        run: npm install --no-fund --no-audit
+
+      # 桌面自带的 Python（清单与沙箱镜像同一份）：prepare-runtime 用 uv 装 venv
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: '3.12'
+
+      # 自带的 LibreOffice：钉 25.2.5，官方归档下载（mac 挂载 dmg 拷出 .app；Windows msi 静默装，
+      # runner 是管理员）。浮动最新版会破坏「与沙箱镜像同版本」的保证
+      - if: matrix.platform == 'darwin'
+        name: Download LibreOffice 25.2.5 (mac)
+        run: |
+          curl -fL -o /tmp/libreoffice.dmg "https://download.documentfoundation.org/libreoffice/old/${LO_VERSION}/mac/arm64/LibreOffice_${LO_VERSION}_MacOS_arm64.dmg"
+          hdiutil attach -nobrowse /tmp/libreoffice.dmg
+          mkdir -p ./lo
+          cp -R "/Volumes/LibreOffice/LibreOffice.app" ./lo/LibreOffice.app
+          hdiutil detach "/Volumes/LibreOffice" -force
+      - if: matrix.platform == 'win32'
+        name: Download and install LibreOffice 25.2.5 (win)
+        shell: pwsh
+        run: |
+          curl -fL -o "$env:RUNNER_TEMP\libreoffice.msi" "https://download.documentfoundation.org/libreoffice/old/${env:LO_VERSION}/win/x86_64/LibreOffice_${env:LO_VERSION}_Win_x86-64.msi"
+          Start-Process msiexec -ArgumentList '/i', "$env:RUNNER_TEMP\libreoffice.msi", '/qn', '/norestart' -Wait
+
+      # 桌面壳（含 electron 与 electron-updater）
+      - name: Install desktop dependencies
+        working-directory: desktop
+        run: npm install --no-fund --no-audit
+
+      # 纯逻辑测试 + 清单一致性
+      - name: Test
+        working-directory: desktop
+        run: npm test
+
+      # 备齐自带运行时：runtime-host 树、独立 Node、Python、LibreOffice（见 scripts/prepare-runtime.mjs）
+      - name: Prepare runtime (node + python + office)
+        working-directory: desktop
+        shell: bash
+        run: node scripts/prepare-runtime.mjs --platform ${{ matrix.platform }}
+        env:
+          # LibreOffice 的安装位置：mac 是 /Applications（里面有 LibreOffice.app），Windows 是安装根
+          # （里面有 program/soffice.exe）；prepare-runtime 归一到 resources/office/
+          KNOWWORK_OFFICE_DIR: ${{ matrix.platform == 'darwin' && format('{0}/lo', github.workspace) || 'C:\Program Files\LibreOffice' }}
+
+      - name: Build
+        working-directory: desktop
+        # electron-builder 的标准平台参数是 --mac/--win（别用 --darwin/--win32 这种非标准写法）
+        run: npx electron-builder ${{ matrix.platform == 'darwin' && '--mac --arm64' || '--win --x64' }}
+
+      # 更新清单缺失 = 自动更新整条线报废：单独上传且缺失即红（electron-builder 只在 publish 配置下产出）
+      - uses: actions/upload-artifact@v4
+        with:
+          name: knowwork-desktop-${{ matrix.platform }}-update-manifests
+          path: |
+            desktop/release/latest.yml
+            desktop/release/latest-mac.yml
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: knowwork-desktop-${{ matrix.platform }}
+          path: |
+            desktop/release/*.dmg
+            desktop/release/*.zip
+            desktop/release/*.exe
+            desktop/release/*.blockmap

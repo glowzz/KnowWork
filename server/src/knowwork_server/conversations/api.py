@@ -9,25 +9,29 @@
 import hmac
 import json
 import logging
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Protocol
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Response
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sse_starlette.sse import EventSourceResponse
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Query, Request, Response
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 
 from ..audit.context import annotate
 from ..kernel.contract import (
     ANSWER_MODE_PATTERN,
+    MODEL_ALIAS_PATTERN,
     KernelError,
+    ModelUnknown,
     QuestionAnswer,
     QuestionAnswerItem,
     SessionBusy,
     SessionNotFound,
     TurnInput,
 )
+from ..net import client_ip
 from ..profile.errors import ProfileUnavailable
 from ..profile.snapshot import MAX_DROPPED, MAX_SELECTED, NO_SELECTION, TurnSelection
 from .answer_modes import AnswerModes, AnswerModeUnavailable, ModeContext, UnknownAnswerMode
@@ -35,11 +39,23 @@ from .feedback import MAX_NOTE, RUN_ID, Feedback, FeedbackStore
 from .mention_kinds import MentionRejected
 from .mentions import MAX_MENTIONS, Mention, mentioned, turn_mentions
 from .models import Conversation
-from .replay import parse_cursor
-from .service import MAX_PAGE, AttachmentUnavailable, ConversationNotFound, ConversationService
+from .quota import QuotaExceeded
+from .replay import Outgoing, parse_cursor
+from .scopes import ConversationScopes, ScopeClaim, ScopeRejected, ScopeUnavailable
+from .service import (
+    MAX_PAGE,
+    AttachmentUnavailable,
+    ConversationNotFound,
+    ConversationService,
+    RunsOnDevice,
+    UnknownModel,
+)
 from .tool_credentials import ToolAccessRevoked, ToolCredentialUnavailable
 
 log = logging.getLogger(__name__)
+
+# 按编号一次取多少段对话（list_conversations 的 ids）
+MAX_LOOKUP = 50
 
 APPROVAL_ID = Path(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
 # 提问以工具调用 id 为身份，各家模型的调用 id 都在这个字符集里
@@ -47,13 +63,40 @@ QUESTION_ID = Path(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_.:-]+$")
 
 
 class Actor(BaseModel):
-    """会话接口眼里的调用者：谁、在哪个工作空间。"""
+    """会话接口眼里的调用者：谁、在哪个工作空间。从网页嵌入进来的另带渠道，公开访问还有访客。"""
 
     user_id: str
     workspace_id: str
+    channel_id: str | None = None
+    visitor: str | None = None
 
 
 ActorDependency = Callable[..., Awaitable[Actor]]
+
+
+EMBED_SOURCE = "web"  # 网页嵌入开的会话记的来源（conversation.source，同 IM 渠道记平台）
+
+
+class Throttled(Exception):
+    """网页嵌入问得太勤（限次，channels/limits.py）；消息直接给用户看。"""
+
+
+class Embedded(Protocol):
+    """网页嵌入的会话（channels/web.py），实现在 channels/web.py。
+
+    带着渠道的调用者只能碰自己从这个渠道开的会话：公开访问时渠道账号是所有访客共用的，按访客分开（核对在调用者依赖里，
+    principals.conversation_actor，所有带会话 id 的接口一处管住）；这里管新建时记下会话位置、列表只列自己的、
+    新开对话与发消息前限次。"""
+
+    async def owns(self, actor: Actor, conversation_id: str) -> bool: ...
+
+    async def started(self, actor: Actor, conversation_id: str) -> None: ...
+
+    async def mine(self, actor: Actor) -> tuple[str, ...]: ...
+
+    async def admit(self, actor: Actor, client_ip: str) -> None: ...
+
+    async def admit_new(self, actor: Actor, client_ip: str) -> None: ...
 
 
 
@@ -63,6 +106,8 @@ class RenameConversation(BaseModel):
 
 def conversation_view(conversation: Conversation) -> dict:
     return {"id": conversation.id, "title": conversation.title,
+            # 从哪来：IM 机器人认人时私聊的会话为平台名（wecom 等），前端打来源标记；网页上开的为空
+            "source": getattr(conversation, "source", "") or "",
             "createdAt": conversation.created_at.isoformat() if conversation.created_at else None,
             "updatedAt": conversation.updated_at.isoformat() if conversation.updated_at else None}
 
@@ -72,6 +117,17 @@ SelectionName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")]
 KnowledgeBaseName = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,64}\.([A-Za-z0-9_-]{1,64}|\*)$")]
 # 检索条件的写法如「部门 = 财务部」「标签：简报」，原样比对，不解析
 ConditionLabel = Annotated[str, Field(min_length=1, max_length=500)]
+# IANA 时区名的写法，如 Asia/Shanghai、America/Argentina/Buenos_Aires、UTC、Etc/GMT+8
+TIME_ZONE_PATTERN = re.compile(r"[A-Za-z][A-Za-z0-9_+-]{0,30}(/[A-Za-z0-9_+-]{1,30}){0,2}")
+TIME_ZONE_MAX = 64  # 同内核合同 TurnInput.time_zone 的上限：写法对、名字超长的也当没带，免得合同校验把消息拒成 500
+
+
+def turn_time_zone(value: object) -> str | None:
+    """浏览器报的时区。只是提示，写法不对的当没带（宿主改用部署时区），不因此拒收这条消息；
+    名字认不认得、别名换成规范名都由宿主照官方的办法做。"""
+    if not isinstance(value, str) or len(value) > TIME_ZONE_MAX:
+        return None
+    return value if TIME_ZONE_PATTERN.fullmatch(value) else None
 
 
 class TurnChoice(BaseModel):
@@ -88,6 +144,8 @@ class TurnChoice(BaseModel):
     # 回答方式：智能体、只查知识库的快速问答（宿主只放行 knowledge_search、knowledge_read），或扩展登记的
     # （answer_modes.py）；用户在输入框里随时切换。登记了没有、这个人能不能用，发消息时由会话服务核对
     answer_mode: str = Field(default="agent", pattern=ANSWER_MODE_PATTERN)
+    # 输入框选的对话模型（别名）；不传 = 不换，这段对话沿用上次选的（宿主按官方会话级选择存着），没选过用默认模型
+    model: str | None = Field(default=None, pattern=MODEL_ALIAS_PATTERN)
 
     def _scoped(self) -> tuple[list[str] | None, list[Mention]]:
         """这一轮算数的技能与 @：快速问答用不了技能（宿主拦下 skill），选了也不算，免得技能目录把它标成选中。"""
@@ -99,14 +157,32 @@ class TurnChoice(BaseModel):
         skills, mentions = self._scoped()
         chosen = TurnSelection(skills=None if skills is None else tuple(skills),
                                knowledge_bases=None if self.knowledge_bases is None else tuple(self.knowledge_bases),
-                               dropped_conditions=tuple(self.dropped_conditions))
+                               dropped_conditions=tuple(self.dropped_conditions), model=self.model)
         return mentioned(chosen, mentions)
+
+
+class ScopeClaimBody(BaseModel):
+    """建对话时要挂的东西（scopes.py 的 ScopeClaim）：扩展登记的类型（例如 expert）与那一项的 id。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str = Field(pattern=r"^[a-z][a-z0-9_]{0,31}$")
+    id: str = Field(min_length=1, max_length=128)
+
+    def claim(self) -> ScopeClaim:
+        return ScopeClaim(kind=self.kind, id=self.id)
 
 
 class CreateConversation(BaseModel):
     title: str = Field(default="", max_length=200)
     # 第一条消息的选择（可选）：带了就按它绑定运行配置
     first_turn: TurnChoice | None = None
+    # 要挂的东西（可选，例如专家）：建出来就挂上，之后按它的范围与身份来；挂不上不建
+    scope: ScopeClaimBody | None = None
+
+
+def scope_rejected(error: ScopeRejected) -> HTTPException:
+    return HTTPException(status_code=404, detail=str(error) or "要挂的东西不存在或你用不了")
 
 
 class SendMessage(TurnChoice):
@@ -114,8 +190,15 @@ class SendMessage(TurnChoice):
     mode: str = Field(default="followup", pattern="^(followup|steer)$")
     # 聊天页选的回答语言；不传时按提问里有没有汉字判断
     language: Literal["zh", "en"] | None = None
+    # 浏览器的时区，模型按它算「今天」
+    time_zone: str | None = None
     # 本轮带的附件 id（先经附件接口上传到这个会话）；文件已在沙箱 /workspace/input 里，模型按需读
     attachments: list[SelectionName] | None = Field(default=None, max_length=20)
+
+    @field_validator("time_zone", mode="before")
+    @classmethod
+    def _time_zone(cls, value: object) -> str | None:
+        return turn_time_zone(value)
 
     @model_validator(mode="after")
     def _quick_has_no_files(self) -> "SendMessage":
@@ -127,8 +210,8 @@ class SendMessage(TurnChoice):
     def turn(self) -> TurnInput:
         # 插话进行中的回合，新的选择留到下一轮才生效（service.send），@ 也就不写进这条消息，免得模型以为已经限定了
         mentions = turn_mentions(self._scoped()[1]) if self.mode == "followup" else ()
-        return TurnInput(text=self.text, mode=self.mode, language=self.language, mentions=mentions,
-                         answer_mode=self.answer_mode)
+        return TurnInput(text=self.text, mode=self.mode, language=self.language, time_zone=self.time_zone,
+                         mentions=mentions, answer_mode=self.answer_mode, model=self.model)
 
 
 class Decision(BaseModel):
@@ -168,6 +251,12 @@ def bearer_matches(authorization: str | None, expected: str) -> bool:
     return hmac.compare_digest(presented, expected.encode("utf-8"))
 
 
+def runs_on_device() -> HTTPException:
+    """在用户设备上执行的对话（device.py）：业务服务不接发消息、停止、审批、回答，页面在那台设备上直接交给它。"""
+    return HTTPException(status_code=409, detail={"code": "runs_on_device",
+                                                  "message": "这段对话在创建它的电脑上执行，请到那台电脑上继续"})
+
+
 def upstream_error(error: Exception, action: str) -> HTTPException:
     if isinstance(error, SessionBusy):
         return HTTPException(status_code=409, detail={"code": "session_busy", "message": "会话正忙，请稍后重试"})
@@ -192,6 +281,27 @@ def credential_error(error: Exception) -> HTTPException:
                                                   "message": "工具服务暂时不可用，请稍后重试"})
 
 
+# 准备这一轮时会拒的：云端发消息与设备上执行的对话开始一轮（扩展的路由）是同一套准备，错误也同一套说法
+TURN_REJECTIONS = (UnknownAnswerMode, MentionRejected, AnswerModeUnavailable, ScopeUnavailable, AttachmentUnavailable,
+                   UnknownModel, ProfileUnavailable, QuotaExceeded)
+
+
+def turn_rejected(error: Exception) -> HTTPException:
+    if isinstance(error, QuotaExceeded):
+        return HTTPException(status_code=429, detail=error.detail())
+    if isinstance(error, UnknownAnswerMode):
+        return HTTPException(status_code=422, detail="不认识这个回答方式，或现在不能用")
+    if isinstance(error, MentionRejected | AttachmentUnavailable):
+        return HTTPException(status_code=422 if isinstance(error, MentionRejected) else 409, detail=str(error))
+    if isinstance(error, AnswerModeUnavailable):
+        return HTTPException(status_code=503, detail="这个回答方式暂时不可用，换一种试试")
+    if isinstance(error, ScopeUnavailable):
+        return HTTPException(status_code=503, detail="这段对话的设置暂时取不到，请稍后再试")
+    if isinstance(error, UnknownModel):
+        return HTTPException(status_code=422, detail="这个模型不存在或已停用，换一个试试")
+    return credential_error(error)
+
+
 class FeedbackBody(BaseModel):
     """对一轮回答的评分（照 DSH 官方的消息反馈）：赞或踩必填，分类与说明可选。"""
 
@@ -207,7 +317,9 @@ def feedback_view(item: Feedback) -> dict:
 
 
 def build_router(service: ConversationService, current_actor: ActorDependency,
-                 feedback: FeedbackStore | None = None) -> APIRouter:
+                 feedback: FeedbackStore | None = None, scopes: ConversationScopes | None = None,
+                 embedded: Embedded | None = None) -> APIRouter:
+    """embedded：网页嵌入（channels/web.py）。没给时带着渠道的调用者新建对话一律 403。"""
     router = APIRouter(prefix="/api/workspaces/{workspace_id}/conversations")
     Who = Annotated[Actor, Depends(current_actor)]
 
@@ -217,23 +329,61 @@ def build_router(service: ConversationService, current_actor: ActorDependency,
         except ConversationNotFound as error:
             raise HTTPException(status_code=404, detail="会话不存在") from error
 
+    async def embedded_mine(who: Actor) -> list[Conversation]:
+        """从网页嵌入进来的人只看得到自己从这个渠道开的会话（公开访问时渠道账号是大家共用的）。"""
+        found: list[Conversation] = []
+        for conversation_id in await embedded.mine(who) if embedded is not None else ():
+            try:
+                found.append(await service.get(conversation_id=conversation_id, workspace_id=who.workspace_id,
+                                               user_id=who.user_id))
+            except ConversationNotFound:
+                continue
+        return found
+
     @router.post("", status_code=201)
-    async def create(body: CreateConversation, who: Who):
+    async def create(body: CreateConversation, who: Who, request: Request):
         """新建对话"""
+        if who.channel_id is not None:
+            if embedded is None:
+                raise HTTPException(status_code=403, detail="网页嵌入没有打开")
+            if body.scope is not None:  # 嵌入页的范围由渠道定，访客不能自己挂
+                raise HTTPException(status_code=403, detail="网页嵌入不能另挂范围")
+            try:
+                await embedded.admit_new(who, client_ip(request))
+            except Throttled as error:
+                raise HTTPException(status_code=429, detail=str(error)) from error
         try:
             selection = body.first_turn.selection() if body.first_turn else NO_SELECTION
             conversation = await service.create(workspace_id=who.workspace_id, user_id=who.user_id, title=body.title,
-                                                selection=selection)
+                                                selection=selection,
+                                                answer_mode=body.first_turn.answer_mode if body.first_turn else None,
+                                                channel_id=who.channel_id,
+                                                source=EMBED_SOURCE if who.channel_id else "",
+                                                scope=body.scope.claim() if body.scope else None)
+        except ScopeRejected as error:
+            raise scope_rejected(error) from error
         except CREDENTIAL_ERRORS as error:
             raise credential_error(error) from error
         except HOST_ERRORS as error:
             raise upstream_error(error, "create conversation") from error
+        if who.channel_id is not None:
+            await embedded.started(who, conversation.id)
         return {"id": conversation.id, "title": conversation.title}
 
     @router.get("")
     async def list_conversations(who: Who, limit: Annotated[int, Query(ge=1, le=MAX_PAGE)] = 30,
-                                 before: datetime | None = None):
-        """列出我的对话"""
+                                 before: datetime | None = None,
+                                 ids: Annotated[str | None, Query(max_length=MAX_LOOKUP * 64)] = None):
+        """列出我的对话
+        ids（逗号分隔，最多 50 个）：只要这几段，一次取齐（侧栏按本机工作区分组时，列表里还没翻到的那些），这时不分页。"""
+        if who.channel_id is not None:
+            return {"items": [conversation_view(c) for c in await embedded_mine(who)], "next": None}
+        if ids is not None:
+            wanted = tuple(dict.fromkeys(item for item in ids.split(",") if item))
+            if len(wanted) > MAX_LOOKUP:
+                raise HTTPException(status_code=422, detail=f"一次最多取 {MAX_LOOKUP} 段对话")
+            found = await service.list_by_ids(workspace_id=who.workspace_id, user_id=who.user_id, ids=wanted)
+            return {"items": [conversation_view(c) for c in found], "next": None}
         page = await service.list_page(workspace_id=who.workspace_id, user_id=who.user_id, limit=limit, before=before)
         return {"items": [conversation_view(c) for c in page.items],
                 "next": page.next.isoformat() if page.next else None}
@@ -241,6 +391,8 @@ def build_router(service: ConversationService, current_actor: ActorDependency,
     @router.get("/search")
     async def search(who: Who, q: Annotated[str, Query(min_length=1, max_length=100)]):
         """侧栏的搜索：标题与每轮问的话里有 q 的对话，最近有动静的在前；snippet 是命中的那句问话的一段。"""
+        if who.channel_id is not None:
+            return {"items": []}  # 嵌入页没有侧栏，也不让从这里搜到别的会话
         hits = await service.search(workspace_id=who.workspace_id, user_id=who.user_id, query=q)
         return {"items": [{**conversation_view(h.conversation), "snippet": h.snippet} for h in hits]}
 
@@ -249,6 +401,22 @@ def build_router(service: ConversationService, current_actor: ActorDependency,
         """对话改名"""
         conversation = await owned(conversation_id, who)
         return conversation_view(await service.rename(conversation, body.title))
+
+    @router.get("/{conversation_id}")
+    async def get(conversation_id: str, who: Who):
+        """一段对话的基本信息
+        标题与来源。对话页按来源决定操作交给谁：在用户设备上执行的对话（来源 device）只能在那台设备上继续。"""
+        return conversation_view(await owned(conversation_id, who))
+
+    @router.get("/{conversation_id}/scope")
+    async def scope(conversation_id: str, who: Who):
+        """对话的范围：扩展给它定的名字与固定的回答方式（scopes.py）；没有范围是 null"""
+        conversation = await owned(conversation_id, who)
+        try:
+            found = await scopes.of(conversation.workspace_id, conversation.id) if scopes else None
+        except ScopeUnavailable as error:
+            raise HTTPException(status_code=503, detail="这段对话的设置暂时取不到，请稍后再试") from error
+        return None if found is None else {"label": found.label, "answerMode": found.answer_mode}
 
     @router.delete("/{conversation_id}", status_code=204)
     async def remove(conversation_id: str, who: Who):
@@ -261,20 +429,23 @@ def build_router(service: ConversationService, current_actor: ActorDependency,
         return Response(status_code=204)
 
     @router.post("/{conversation_id}/messages", status_code=202)
-    async def send(conversation_id: str, body: SendMessage, who: Who):
+    async def send(conversation_id: str, body: SendMessage, who: Who, request: Request):
         """发消息（提问或插话）"""
         conversation = await owned(conversation_id, who)
+        if who.channel_id is not None and embedded is not None:
+            try:
+                await embedded.admit(who, client_ip(request))
+            except Throttled as error:
+                raise HTTPException(status_code=429, detail=str(error)) from error
         try:
             message_id = await service.send(conversation, body.turn(), body.selection(),
                                             tuple(body.attachments or ()))
-        except UnknownAnswerMode as error:
-            raise HTTPException(status_code=422, detail="不认识这个回答方式，或现在不能用") from error
-        except MentionRejected as error:
-            raise HTTPException(status_code=422, detail=str(error)) from error
-        except AnswerModeUnavailable as error:
-            raise HTTPException(status_code=503, detail="这个回答方式暂时不可用，换一种试试") from error
-        except AttachmentUnavailable as error:
-            raise HTTPException(status_code=409, detail=str(error)) from error
+        except RunsOnDevice as error:
+            raise runs_on_device() from error
+        except TURN_REJECTIONS as error:
+            raise turn_rejected(error) from error
+        except ModelUnknown as error:
+            raise HTTPException(status_code=503, detail="这个模型暂时用不了，请稍后再试或换一个") from error
         except CREDENTIAL_ERRORS as error:
             raise credential_error(error) from error
         except HOST_ERRORS as error:
@@ -302,12 +473,23 @@ def build_router(service: ConversationService, current_actor: ActorDependency,
             await feedback.delete(await owned(conversation_id, who), run_id)
             return Response(status_code=204)
 
+    @router.post("/{conversation_id}/warm", status_code=204)
+    async def warm(conversation_id: str, who: Who) -> None:
+        """预热对话
+
+        输入框里加了附件、快要发消息时调：先把宿主上的对话和沙箱容器备好，发送时不用现开、现建。尽力而为，
+        失败不报错（发送时照常会再开）。
+        """
+        await service.warm(await owned(conversation_id, who))
+
     @router.post("/{conversation_id}/cancel")
     async def cancel(conversation_id: str, who: Who):
         """停止正在进行的回答"""
         conversation = await owned(conversation_id, who)
         try:
             result = await service.cancel(conversation)
+        except RunsOnDevice as error:
+            raise runs_on_device() from error
         except HOST_ERRORS as error:
             raise upstream_error(error, "cancel") from error
         return {"settled": result.settled, "status": result.status}
@@ -329,6 +511,8 @@ def build_router(service: ConversationService, current_actor: ActorDependency,
         annotate(allow=body.allow, scope=body.scope)
         try:
             await service.decide(conversation, approval_id, body.allow, remember=body.allow and body.scope == "session")
+        except RunsOnDevice as error:
+            raise runs_on_device() from error
         except KernelError as error:
             if error.status == 404:
                 raise HTTPException(status_code=404, detail="审批不存在或已结束") from error
@@ -355,6 +539,8 @@ def build_router(service: ConversationService, current_actor: ActorDependency,
         annotate(answers=len(body.answers))  # 回答内容可能敏感，审计只记题数
         try:
             await service.answer(conversation, question_id, body.contract())
+        except RunsOnDevice as error:
+            raise runs_on_device() from error
         except CREDENTIAL_ERRORS as error:
             raise credential_error(error) from error
         except KernelError as error:
@@ -373,17 +559,21 @@ def build_router(service: ConversationService, current_actor: ActorDependency,
         """对话事件流（SSE）"""
         conversation = await owned(conversation_id, who)
         feed = service.events(conversation, parse_cursor(last_event_id, after))
-
-        async def stream() -> AsyncIterator[dict]:
-            async for item in feed:
-                data = json.dumps(item.payload, ensure_ascii=False)
-                # 逐字片段不带 id：浏览器的 Last-Event-ID 只停在落库的事件上
-                yield ({"event": item.type, "data": data} if item.sse_id is None
-                       else {"id": item.sse_id, "event": item.type, "data": data})
-
-        return EventSourceResponse(stream(), ping=15)
+        return EventSourceResponse(event_stream(feed), ping=15)
 
     return router
+
+
+async def event_stream(feed: AsyncIterator[Outgoing]) -> AsyncIterator[dict | ServerSentEvent]:
+    """对话事件流的内容。一开头先发一行注释：还没有任何事件的对话（例如扩展先建好、还没问过的），经开发服务器这类 Node
+    代理时，响应头要等第一段内容才转给浏览器，不先发一行就要干等到第一个心跳（15 秒），页面一直写「正在连接…」。
+    浏览器那边注释行直接跳过（api/sse.ts）。"""
+    yield ServerSentEvent(comment="connected")
+    async for item in feed:
+        data = json.dumps(item.payload, ensure_ascii=False)
+        # 逐字片段不带 id：浏览器的 Last-Event-ID 只停在落库的事件上
+        yield ({"event": item.type, "data": data} if item.sse_id is None
+               else {"id": item.sse_id, "event": item.type, "data": data})
 
 
 def build_answer_modes_router(modes: AnswerModes, current_actor: ActorDependency) -> APIRouter:

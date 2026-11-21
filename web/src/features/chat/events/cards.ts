@@ -3,7 +3,16 @@
  * 这里再按形状认一遍：认不出的卡片丢掉，界面只渲染文本。
  */
 import { isRecord } from './parse';
-import type { CardCell, ProvenanceCard, ResultCard, TableCard, TableCardColumn, TableChart } from './types';
+import type {
+  CardCell,
+  ProvenanceCard,
+  ResultCard,
+  SuggestionsCard,
+  TableCard,
+  TableCardColumn,
+  TableChart,
+  TableDrill,
+} from './types';
 
 const KINDS = new Set(['number', 'text', 'date']);
 const CHART_TYPES = new Set(['line', 'bar', 'pie']);
@@ -33,7 +42,37 @@ function chart(value: unknown, names: ReadonlySet<string>): TableChart | undefin
   const series = text(value.series);
   if (!names.has(x) || y.length === 0 || !y.every((v) => names.has(v) && v !== x)) return undefined;
   if (series && (!names.has(series) || series === x || y.includes(series))) return undefined;
-  return { type: value.type as TableChart['type'], x, y, ...(series ? { series } : {}) };
+  const groups = series ? undefined : groupsOf(value.groups, y);
+  return {
+    type: value.type as TableChart['type'],
+    x,
+    y,
+    ...(series ? { series } : {}),
+    ...(groups ? { groups } : {}),
+  };
+}
+
+/** 几列数值的分组：正好把 y 分完、每列只出现一次才要；不对就不分组（一列一列画），图照样画 */
+function groupsOf(value: unknown, y: readonly string[]): string[][] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const groups = value.filter(
+    (g): g is string[] => Array.isArray(g) && g.length > 0 && g.every((v) => typeof v === 'string'),
+  );
+  const flat = groups.flat();
+  const exact =
+    groups.length === value.length &&
+    flat.length === y.length &&
+    new Set(flat).size === flat.length &&
+    flat.every((name) => y.includes(name));
+  return exact ? groups.map((g) => [...g]) : undefined;
+}
+
+/** 下钻：组件名、编号都在，列都在表里才要 */
+function drill(value: unknown, names: ReadonlySet<string>): TableDrill | undefined {
+  if (!isRecord(value) || !text(value.name) || !text(value.ref) || !Array.isArray(value.columns))
+    return undefined;
+  const columns = value.columns.filter((c): c is string => typeof c === 'string' && names.has(c));
+  return columns.length > 0 ? { name: text(value.name), ref: text(value.ref), columns } : undefined;
 }
 
 function table(value: Record<string, unknown>): TableCard | undefined {
@@ -45,7 +84,9 @@ function table(value: Record<string, unknown>): TableCard | undefined {
     .map((row) => Array.from({ length: width }, (_, i) => cell(row[i] ?? null)));
   const rowCount =
     typeof value.row_count === 'number' && value.row_count >= rows.length ? value.row_count : rows.length;
-  const drawn = chart(value.chart, new Set(columns.map((c) => c?.name ?? '')));
+  const names = new Set(columns.map((c) => c?.name ?? ''));
+  const drawn = chart(value.chart, names);
+  const drilled = drill(value.drill, names);
   return {
     type: 'table',
     ...(text(value.title) ? { title: text(value.title) } : {}),
@@ -55,6 +96,7 @@ function table(value: Record<string, unknown>): TableCard | undefined {
     rowCount,
     moreRows: value.more_rows === true,
     ...(drawn ? { chart: drawn } : {}),
+    ...(drilled ? { drill: drilled } : {}),
   };
 }
 
@@ -82,13 +124,29 @@ function provenance(value: Record<string, unknown>): ProvenanceCard | undefined 
   };
 }
 
+function suggestions(value: Record<string, unknown>): SuggestionsCard | undefined {
+  const questions = (Array.isArray(value.questions) ? value.questions : [])
+    .map((question) => text(question))
+    .filter((question) => question !== '');
+  if (questions.length === 0) return undefined;
+  const title = text(value.title);
+  const line = text(value.text);
+  return { type: 'suggestions', ...(title ? { title } : {}), ...(line ? { text: line } : {}), questions };
+}
+
 /** 事件里的 presentation；不是协议 v1 或一张都认不出时返回 undefined。 */
 export function resultCards(value: unknown): readonly ResultCard[] | undefined {
   if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.cards)) return undefined;
   const cards = value.cards
     .filter(isRecord)
     .map((card) =>
-      card.type === 'table' ? table(card) : card.type === 'provenance' ? provenance(card) : undefined,
+      card.type === 'table'
+        ? table(card)
+        : card.type === 'provenance'
+          ? provenance(card)
+          : card.type === 'suggestions'
+            ? suggestions(card)
+            : undefined,
     )
     .filter((card): card is ResultCard => card !== undefined);
   return cards.length > 0 ? cards : undefined;

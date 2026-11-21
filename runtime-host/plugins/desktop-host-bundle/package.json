@@ -1,0 +1,9 @@
+{
+  "name": "@knowwork/desktop-host-bundle",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "KnowWork 桌面端本机宿主的环境层：叠在官方 dsh-base 与通用层（@knowwork/dsh-host）之上，保留官方本机执行世界与三档权限预设，收件入口只给桌面主进程",
+  "main": "index.js",
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

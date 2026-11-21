@@ -24,16 +24,22 @@ SCHEMA = "events.v1"
 
 RUN_TYPES = ("run.started", "run.completed", "run.failed", "run.cancelled", "run.waiting")
 ITEM_TYPES = ("item.started", "item.delta", "item.updated", "item.completed", "item.failed")
-ITEM_KINDS = ("message", "thinking", "tool", "approval", "input_request", "todo", "artifact", "evidence",
+ITEM_KINDS = ("message", "thinking", "tool", "approval", "input_request", "todo", "artifact", "deliverable", "evidence",
               "subagent", "background_job", "error")
 
 GAP_KIND = "kernel.gap"
+# 不是人发起一轮时那条消息的来源（官方 source.kind）：展示成「谁发起了这一轮」，不当用户的话。
+# 定时任务到点；后台任务（官方 dsh-tool-jobs）或在后台跑的子 Agent（dsh-subagent）做完时 Agent 正空闲，官方自己开一轮
+# 让它接着处理结果。Agent 正忙时官方把同样的消息塞进当前这一轮，那就不算发起（前端与运行记录只认一轮的第一条）
+TRIGGER_TITLES = {"schedule": "定时任务", "tool-jobs": "后台任务完成", "subagent-settled": "子 Agent 完成"}
+TRIGGER_SOURCES = tuple(TRIGGER_TITLES)
 TEXT_LIMIT = 8000
 # 宿主给附件写的说明块（runtime-host attachment-handles.mjs，逐字照官方 dsh-llm 的 fileHandleText）：
 # 不进显示文字，换成附件列表。文件名是 JSON 字符串（官方 quoted 即 JSON.stringify）。
 _FILE_HANDLE = re.compile(r'^\[File (?P<name>"(?:[^"\\]|\\.)*") \((?P<bytes>\d+) bytes, sha256:[0-9a-f]{8}\): '
                           r'verbatim read-only copy saved at ')
-_EXTRACTED_HANDLE = "[Markdown extracted from "
+# 解析结果的位置、给模型读的全文或目录（attachment-handles.mjs 的 extractedText、pendingText、contentsText）：同样不进显示文字
+_READING_HANDLES = ("[Markdown extracted from ", "[Contents of ")
 # 宿主写的 @ 说明块（runtime-host mentions.mjs）：第一行是这个前缀加 JSON，不进显示文字，换成气泡上的小标签
 _MENTION_PREFIX = "[用户这一轮 @ 点名的范围] "
 MENTION_TYPES = ("knowledge_base", "folder", "document", "tag", "mcp", "skill", "extension")
@@ -43,18 +49,45 @@ LABEL_LIMIT = 1000
 MAX_QUESTIONS = 16
 MAX_OPTIONS = 32
 MAX_TODOS = 100
+MAX_DELIVERABLES = 100
+PATH_LIMIT = 4096
 MAX_CONDITIONS = 50
 MAX_SEARCH_DOCUMENTS = 50
 TODO_STATUSES = ("pending", "in_progress", "completed")
-QUESTION_FRAMES = ("question/requested", "question/answered", "question/continued", "question/closed")
+MAX_AUTO_APPROVED = 64  # 标了自动批准、还没等到 approval/decided 的；正常几毫秒内就到，这只是兜底
+# 向用户提问也只认官方日志（同审批）：ask_user_question 的工具调用、它的结果、迟到回答（官方 user-question-reply 消息），
+# 规则同官方 dsh-user-questions 的 userQuestions 会话投影。服务端执行与本机执行的对话一样，不认应答者另发的帧。
+ASK_USER = "ask_user_question"
+QUESTION_REPLY = "user-question-reply"
+OUTCOME_UNKNOWN = "TOOL_OUTCOME_UNKNOWN"  # 宿主崩溃后恢复会话，官方给没结束的调用补的结果：提问转入稍后再答
+# 提问没等到回答就关了：官方 UserQuestionError 的码记在工具结果的 error.code 里（2026-11-13 在本机宿主上实测）。
+# 超时是 ASK_TIMED_OUT（不限时的调用到了应答者的等待上限、legacy 模式到期），别的（中止、回合取消）都算已失效
+ASK_TIMED_OUT = "ASK_TIMED_OUT"
+MAX_OPEN_QUESTIONS = 64
+# 审批只认官方日志一个来源：官方审批服务（dsh-user-approval）在发起审批的会话日志里记的这一对，
+# 卡片编号就是日志里的官方编号，答审批的接口认的也是它。子 Agent 的那一对在它自己的会话里，经 subagent/event 转到根会话。
+# 宿主上我们的应答者按「本会话不再询问」自动批准时，另发一个只带官方编号的标记 approval/auto，卡片据此写「自动批准」。
+APPROVAL_EVENTS = ("approval/asked", "approval/decided")
+# 宿主的待办核对（runtime-host todo-check.mjs）：一轮正常要结束、待办还有没勾的，宿主补这条消息让模型再走一步更新待办。
+# 那一步的 todo_write 和收尾的一句话不该顶掉原来的回答（前端把工具前的文字当过程说明，回答就成了「待办已更新」），
+# 所以提醒之后只更新待办时，那次调用和收尾的话都不展示；待办照新写的那份更新。提醒之后又做了别的事，就照常展示
+TODO_CHECK_SOURCE = "knowwork-todo-check"
+TODO_TOOL = "todo_write"
 
 
 @dataclass(frozen=True)
 class ProjectionState:
-    """跨帧需要记住的最少信息：当前轮次（插件帧不带轮次）、本轮技能门是否已判失败。"""
+    """跨帧需要记住的最少信息：当前轮次（插件帧不带轮次）、本轮技能门是否已判失败、
+    已标成自动批准、还没答完的审批（approval/auto 先到，日志里的 approval/decided 后到）、提问的模式与还能答的提问。"""
 
     turn: int | None = None
     gate_failed_turn: int | None = None
+    auto_approved: frozenset[str] = frozenset()
+    timed_questions: bool = False  # 最近一次请求头里 ask_user_question 是不是计时模式（能转入稍后再答）
+    questions: frozenset[str] = frozenset()  # 还能答的提问（开着或转入稍后再答）的工具调用 id
+    tidy_turn: int | None = None  # 宿主提醒过更新待办的那一轮（提醒之后只更新待办的那一步不展示）
+    tidy_working: bool = False  # 提醒之后模型又做了别的事：之后照常展示
+    tidy_calls: frozenset[str] = frozenset()  # 提醒之后那几次 todo_write 的调用 id，它们的结果也不展示
 
 
 def _run_id(turn: int | None) -> str | None:
@@ -153,8 +186,10 @@ def _assistant_message(state: ProjectionState, payload: dict, seq: int, time: in
 
 def _user_message(state: ProjectionState, payload: dict, seq: int, time: int) -> list[dict]:
     """用户亲自发的消息（提问与插话）归到当前这一轮。宿主也用 user/message 注入运行时上下文、
-    子 Agent 回报等，它们的 source.kind 不是 user，不展示给用户。"""
+    子 Agent 回报等，它们的 source.kind 不是 user，不展示给用户；定时任务到点投进来的展示成「谁发起了这一轮」。"""
     source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    if source.get("kind") in TRIGGER_SOURCES:
+        return _trigger(state, payload, source, seq, time)
     if source.get("kind") != "user":
         return []
     text, attachments, mentions = user_parts(payload.get("content"))
@@ -165,6 +200,43 @@ def _user_message(state: ProjectionState, payload: dict, seq: int, time: int) ->
             **({"mentions": mentions} if mentions else {})}
     return [_event("item.completed", seq=seq, turn=state.turn, time=time, item_id=message_id, kind="message",
                    data=data)]
+
+
+def _trigger(state: ProjectionState, payload: dict, source: dict, seq: int, time: int) -> list[dict]:
+    """不是人发起的一轮（照官方对话界面：一条可展开的通知，写明是什么触发的）。"""
+    text = trigger_text(source, payload.get("content"))[:TEXT_LIMIT]
+    message_id = str(payload.get("id") or f"trigger-{seq}")
+    return [_event("item.completed", seq=seq, turn=state.turn, time=time, item_id=message_id, kind="message",
+                   data={"role": "trigger", "source": str(source["kind"]), "text": text})]
+
+
+def trigger_text(source: dict, content: Any) -> str:
+    """自动发起的那条消息里给人看的部分：定时任务是各任务的提示词（空行隔开）；后台任务、子 Agent 是官方写在来源上的
+    一句摘要（命令与退出状态、哪个子 Agent 怎么结束的），没有摘要时给全文。"""
+    text = _joined(content, ("text",))
+    if source.get("kind") == "schedule":
+        return "\n\n".join(reminder_prompts(text))
+    summary = source.get("summary")
+    return summary if isinstance(summary, str) and summary else text
+
+
+def reminder_prompts(text: str) -> list[str]:
+    """官方定时任务的提醒正文（dsh-schedule 的 renderReminderFraming / renderRecurringReminderBatchFraming）里
+    各任务的提示词：单条是 reminder_prompt_json 一行，合并投递是 reminders_json 一行。认不出来就原样给全文。"""
+    for line in text.splitlines():
+        key, _, value = line.partition(": ")
+        try:
+            if key == "reminder_prompt_json":
+                prompt = json.loads(value)
+                return [prompt] if isinstance(prompt, str) else [text]
+            if key == "reminders_json":
+                items = json.loads(value)
+                prompts = [i["reminder_prompt"] for i in items if isinstance(i, dict)
+                           and isinstance(i.get("reminder_prompt"), str)] if isinstance(items, list) else []
+                return prompts or [text]
+        except ValueError:
+            return [text]
+    return [text]
 
 
 def _mentions(block: str) -> list[dict] | None:
@@ -208,7 +280,7 @@ def user_parts(content: Any) -> tuple[str, list[dict], list[dict]]:
                 attachments.append({"name": str(json.loads(found["name"])), "size": int(found["bytes"])})
             except ValueError:
                 texts.append(block["text"])
-        elif not block["text"].startswith(_EXTRACTED_HANDLE):
+        elif not block["text"].startswith(_READING_HANDLES):
             texts.append(block["text"])
     return "".join(texts)[:TEXT_LIMIT], attachments, mentions
 
@@ -244,10 +316,16 @@ def _tool_call(state: ProjectionState, payload: dict, seq: int, time: int) -> li
                    data={"name": str(payload.get("name", "")), "arguments": payload.get("arguments")})]
 
 
-def _tool_result(state: ProjectionState, payload: dict, seq: int, time: int) -> list[dict]:
+def _result_call_id(payload: dict) -> str | None:
     message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
     call_id = message.get("toolCallId") or (message.get("source") or {}).get("callId")
-    if not isinstance(call_id, str):
+    return call_id if isinstance(call_id, str) else None
+
+
+def _tool_result(state: ProjectionState, payload: dict, seq: int, time: int) -> list[dict]:
+    message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
+    call_id = _result_call_id(payload)
+    if call_id is None:
         return []
     turn = _turn(payload, state)
     failed = message.get("isError") is True
@@ -275,19 +353,44 @@ def _session_event(state: ProjectionState, event: Any, seq: int) -> tuple[Projec
     time = _int(event.get("time")) or 0  # 缺时间时记 0，不影响排序（排序看 seq）
     if kind == "turn/start":
         turn = _int(payload.get("turn"))
-        return replace(state, turn=turn, gate_failed_turn=None), [_event("run.started", seq=seq, turn=turn, time=time)]
+        return (replace(state, turn=turn, gate_failed_turn=None, tidy_turn=None, tidy_working=False, tidy_calls=frozenset()),
+                [_event("run.started", seq=seq, turn=turn, time=time)])
+    tidying = state.tidy_turn is not None and state.tidy_turn == _turn(payload, state) and not state.tidy_working
+    if kind == "assistant/message" and tidying:
+        return state, []
+    if kind == "tool/call" and tidying:
+        call_id = payload.get("callId")
+        if payload.get("name") == TODO_TOOL and isinstance(call_id, str):
+            return replace(state, tidy_calls=state.tidy_calls | {call_id}), []
+        state = replace(state, tidy_working=True)
+    if kind == "tool/result" and _result_call_id(payload) in state.tidy_calls:
+        return state, []
     if kind == "turn/end":
         return _turn_end(state, payload, seq, time)
     if kind == "assistant/message":
         return state, _assistant_message(state, payload, seq, time)
+    if kind == "request/header":
+        return _question_mode(state, payload), []
     if kind == "user/message":
-        return state, _user_message(state, payload, seq, time)
+        source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        if source.get("kind") == TODO_CHECK_SOURCE:
+            return replace(state, tidy_turn=state.turn, tidy_working=False, tidy_calls=frozenset()), []
+        answered, events = _question_reply(state, payload, seq, time)
+        return answered, events + _user_message(state, payload, seq, time)
     if kind == "tool/call":
-        return state, _tool_call(state, payload, seq, time)
+        asked, events = _question_asked(state, payload, seq, time)
+        return asked, _tool_call(state, payload, seq, time) + events
     if kind == "tool/result":
-        return state, _tool_result(state, payload, seq, time)
+        settled, events = _question_result(state, payload, seq, time)
+        return settled, _tool_result(state, payload, seq, time) + events
     if kind == "todo/write":
         return state, _todos(state, payload, seq, time)
+    if kind == "tool/ptc-dispatch":
+        return _question_dispatched(state, payload, seq, time)
+    if kind == "deliverables/presented":
+        return state, _deliverables(state, payload, seq, time)
+    if kind in APPROVAL_EVENTS:
+        return _approval(state, kind, payload, seq, time)
     return state, []
 
 
@@ -303,19 +406,56 @@ def _todos(state: ProjectionState, payload: dict, seq: int, time: int) -> list[d
                    data={"items": items})]
 
 
-def _approval(state: ProjectionState, kind: str, data: dict, seq: int, time: int) -> list[dict]:
+def _deliverables(state: ProjectionState, payload: dict, seq: int, time: int) -> list[dict]:
+    """官方 present 交付的文件（deliverables/presented）：路径照宿主给的原样（服务端会话是 /sessions/<会话>/...，本机会话是
+    用户电脑上的路径），带说明的带上。网页与桌面都按它出交付卡片、按路径读（方案 7.7.3）；一次交付一个条目，
+    同一路径交付多次由前端用最近一次的说明（同官方交付卡片）。"""
+    raw = payload.get("files")
+    if not isinstance(raw, list):
+        return []
+    files = [{"path": item["path"][:PATH_LIMIT],
+              **({"description": item["description"][:FIELD_LIMIT]} if isinstance(item.get("description"), str) else {})}
+             for item in raw[:MAX_DELIVERABLES]
+             if isinstance(item, dict) and isinstance(item.get("path"), str) and item["path"]]
+    if not files:
+        return []
+    return [_event("item.completed", seq=seq, turn=state.turn, time=time, item_id=f"deliverable-{seq}",
+                   kind="deliverable", data={"files": files})]
+
+
+def _approval(state: ProjectionState, kind: str, data: dict, seq: int, time: int) -> tuple[ProjectionState, list[dict]]:
+    """日志里的一对：approval/asked → 卡片出现、这一轮等审批；approval/decided → 卡片结束（自动批准的带 auto）。"""
     approval_id = data.get("id")
     if not isinstance(approval_id, str):
-        return []
-    if kind == "approval/resolved":
-        return [_event("item.completed", seq=seq, turn=state.turn, time=time, item_id=approval_id,
-                       kind="approval", data={"outcome": str(data.get("outcome", ""))})]
+        return state, []
+    if kind == "approval/decided":
+        auto = approval_id in state.auto_approved
+        done = _event("item.completed", seq=seq, turn=state.turn, time=time, item_id=approval_id, kind="approval",
+                      data={"outcome": str(data.get("outcome", "")), **({"auto": True} if auto else {})})
+        return replace(state, auto_approved=state.auto_approved - {approval_id}), [done]
     detail = {"tool_name": str(data.get("toolName", "")), "call_id": data.get("callId"), "reason": data.get("reason")}
-    return [
+    return state, [
         _event("item.started", seq=seq, turn=state.turn, time=time, item_id=approval_id, kind="approval", data=detail),
         _event("run.waiting", seq=seq, turn=state.turn, time=time, item_id=approval_id,
                data={"reason": "approval"}),
     ]
+
+
+def _subagent_event(state: ProjectionState, data: dict, seq: int, time: int) -> tuple[ProjectionState, list[dict]]:
+    """子 Agent 自己会话里的事件（宿主或设备转发来的 {sessionId, event}）：现在只转审批，卡片出在根会话上。"""
+    event = data.get("event") if isinstance(data.get("event"), dict) else {}
+    kind = event.get("type")
+    if kind not in APPROVAL_EVENTS:
+        return state, []
+    payload = event.get("data") if isinstance(event.get("data"), dict) else {}
+    return _approval(state, kind, payload, seq, _int(event.get("time")) or time)
+
+
+def _auto_approved(state: ProjectionState, data: dict) -> tuple[ProjectionState, list[dict]]:
+    approval_id = data.get("id")
+    if not isinstance(approval_id, str) or len(state.auto_approved) >= MAX_AUTO_APPROVED:
+        return state, []
+    return replace(state, auto_approved=state.auto_approved | {approval_id}), []
 
 
 def _text(value: Any, limit: int = FIELD_LIMIT) -> str | None:
@@ -360,24 +500,102 @@ def _answers(raw: Any) -> list[dict]:
     return answers
 
 
-def _question(state: ProjectionState, kind: str, data: dict, seq: int, time: int) -> list[dict]:
-    """提问应答者的帧。item_id 是工具调用 id，迟到回答落在后来那一轮里，前端按 item_id 找回原卡片。"""
-    question_id = data.get("id")
-    if not isinstance(question_id, str):
-        return []
-    common = {"seq": seq, "turn": state.turn, "time": time, "item_id": question_id, "kind": "input_request"}
-    if kind == "question/requested":
-        detail = {"questions": _questions(data.get("questions")), "timed": data.get("timed") is True}
-        return [_event("item.started", **common, data=detail),
-                _event("run.waiting", seq=seq, turn=state.turn, time=time, item_id=question_id, data={"reason": "input"})]
-    if kind == "question/answered":
-        return [_event("item.completed", **common, data={"answers": _answers(data.get("answers")),
-                                                          "late": data.get("late") is True})]
-    if kind == "question/continued":
-        return [_event("item.updated", **common, data={"state": "continued"})]
-    # interrupted：宿主正常关闭时官方把等待中的提问中止了，恢复后不能再答（见宿主 question-broker）
-    reason = data.get("reason") if data.get("reason") in ("timeout", "cancelled", "interrupted") else "cancelled"
-    return [_event("item.failed", **common, data={"reason": reason})]
+def _question_mode(state: ProjectionState, payload: dict) -> ProjectionState:
+    """请求头里的工具定义：ask_user_question 带 timeout 参数就是计时模式（同官方 isTimedAskUserQuestionSchema）。"""
+    header = payload.get("header") if isinstance(payload.get("header"), dict) else {}
+    tools = header.get("tools") if isinstance(header.get("tools"), list) else []
+    timed = any(isinstance(tool, dict) and tool.get("name") == ASK_USER and isinstance(tool.get("parameters"), dict)
+                and isinstance(tool["parameters"].get("properties"), dict) and "timeout" in tool["parameters"]["properties"]
+                for tool in tools)
+    return state if timed == state.timed_questions else replace(state, timed_questions=timed)
+
+
+def _json_text(content: Any) -> tuple[str, Any]:
+    """消息内容里第一段文字，和它按 JSON 读出来的样子（读不出来是 None）。"""
+    blocks = content if isinstance(content, list) else []
+    text = next((block.get("text") for block in blocks
+                 if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)), "")
+    try:
+        return text, json.loads(text)
+    except ValueError:
+        return text, None
+
+
+def _question_common(state: ProjectionState, call_id: str, seq: int, time: int) -> dict:
+    return {"seq": seq, "turn": state.turn, "time": time, "item_id": call_id, "kind": "input_request"}
+
+
+def _question_asked(state: ProjectionState, payload: dict, seq: int, time: int) -> tuple[ProjectionState, list[dict]]:
+    """模型调 ask_user_question：卡片出现、这一轮等用户。item_id 是工具调用 id，回答与迟到回答都按它找回这张卡。"""
+    call_id = payload.get("callId")
+    if payload.get("name") != ASK_USER or not isinstance(call_id, str):
+        return state, []
+    raw = payload.get("arguments")
+    try:
+        arguments = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return state, []
+    questions = _questions(arguments.get("questions")) if isinstance(arguments, dict) else []
+    if not questions or len(state.questions) >= MAX_OPEN_QUESTIONS:
+        return state, []
+    common = _question_common(state, call_id, seq, time)
+    return replace(state, questions=state.questions | {call_id}), [
+        _event("item.started", **common, data={"questions": questions, "timed": state.timed_questions}),
+        _event("run.waiting", seq=seq, turn=state.turn, time=time, item_id=call_id, data={"reason": "input"}),
+    ]
+
+
+def _question_result(state: ProjectionState, payload: dict, seq: int, time: int) -> tuple[ProjectionState, list[dict]]:
+    """提问的工具结果（同官方 userQuestions 投影）：带 answers 是答了；pending、或宿主崩溃后官方补的「结果未知」是转入
+    稍后再答（问题仍可答）；别的失败是关闭（超时，或中止——回合取消、宿主正常关闭）。"""
+    message = payload.get("message") if isinstance(payload.get("message"), dict) else {}
+    call_id = message.get("toolCallId")
+    if call_id not in state.questions:
+        return state, []
+    common = _question_common(state, call_id, seq, time)
+    _, parsed = _json_text(message.get("content"))
+    error = payload.get("error") if isinstance(payload.get("error"), dict) else None
+    if (isinstance(parsed, dict) and parsed.get("pending") is True) or (error or {}).get("code") == OUTCOME_UNKNOWN:
+        return state, [_event("item.updated", **common, data={"state": "continued"})]
+    rest = replace(state, questions=state.questions - {call_id})
+    if error is None and message.get("isError") is not True and isinstance(parsed, dict) \
+            and isinstance(parsed.get("answers"), list):
+        return rest, [_event("item.completed", **common, data={"answers": _answers(parsed["answers"]), "late": False})]
+    reason = "timeout" if (error or {}).get("code") == ASK_TIMED_OUT else "cancelled"
+    return rest, [_event("item.failed", **common, data={"reason": reason})]
+
+
+def _question_dispatched(state: ProjectionState, payload: dict, seq: int,
+                         time: int) -> tuple[ProjectionState, list[dict]]:
+    """PTC 里发起的提问（官方 tool/ptc-dispatch）：同官方 userQuestions 投影，只认已转入稍后再答的那种（PTC 不在前台等人，
+    提问一发出就是 pending），出一张能稍后再答的卡片；item_id 是 subCallId，迟到回答按它找回这张卡。"""
+    call_id = payload.get("subCallId")
+    if payload.get("name") != ASK_USER or payload.get("isError") is True or not isinstance(call_id, str):
+        return state, []
+    _, parsed = _json_text(payload.get("content"))
+    arguments = payload.get("arguments")
+    questions = _questions(arguments.get("questions")) if isinstance(arguments, dict) else []
+    if not (isinstance(parsed, dict) and parsed.get("pending") is True) or not questions \
+            or len(state.questions) >= MAX_OPEN_QUESTIONS:
+        return state, []
+    common = _question_common(state, call_id, seq, time)
+    return replace(state, questions=state.questions | {call_id}), [
+        _event("item.started", **common, data={"questions": questions, "timed": True}),
+        _event("item.updated", **common, data={"state": "continued"}),
+    ]
+
+
+def _question_reply(state: ProjectionState, payload: dict, seq: int, time: int) -> tuple[ProjectionState, list[dict]]:
+    """转入稍后再答的提问收到回答：官方把它作为 user-question-reply 用户消息送进来，进日志时算答了（迟到回答，
+    落在后来那一轮里，前端按 item_id 找回原卡片）。"""
+    source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    call_id = source.get("callId")
+    if source.get("kind") != QUESTION_REPLY or call_id not in state.questions:
+        return state, []
+    _, parsed = _json_text(payload.get("content"))
+    answers = _answers(parsed.get("answers")) if isinstance(parsed, dict) else []
+    return replace(state, questions=state.questions - {call_id}), [
+        _event("item.completed", **_question_common(state, call_id, seq, time), data={"answers": answers, "late": True})]
 
 
 def _subagent(state: ProjectionState, kind: str, data: dict, seq: int, time: int) -> list[dict]:
@@ -395,10 +613,10 @@ def project(state: ProjectionState, kind: str, data: Any, *, seq: int, time: int
     if kind == "session/event":
         return _session_event(state, data, seq)
     payload = data if isinstance(data, dict) else {}
-    if kind in ("approval/requested", "approval/resolved"):
-        return state, _approval(state, kind, payload, seq, time)
-    if kind in QUESTION_FRAMES:
-        return state, _question(state, kind, payload, seq, time)
+    if kind == "approval/auto":
+        return _auto_approved(state, payload)
+    if kind == "subagent/event":
+        return _subagent_event(state, payload, seq, time)
     if kind in ("subagent/started", "subagent/finished"):
         return state, _subagent(state, kind, payload, seq, time)
     if kind == "skill-gate/failed":

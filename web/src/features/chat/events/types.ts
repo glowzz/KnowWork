@@ -77,6 +77,15 @@ export interface TableChart {
   readonly x: string;
   readonly y: readonly string[];
   readonly series?: string;
+  /** 几列数值怎么分组（正好分完 y）：同一组的画在一张图里，组之间在图上面切换；没有时一列一组 */
+  readonly groups?: readonly (readonly string[])[];
+}
+
+/** 表上哪几列的取值能点着往下钻：点了交给插槽 chat.card.drill 里登记了 name 的组件（扩展的），ref 是它认的编号 */
+export interface TableDrill {
+  readonly name: string;
+  readonly ref: string;
+  readonly columns: readonly string[];
 }
 
 /** 结果表：前几行与这次结果一共多少行。 */
@@ -92,6 +101,8 @@ export interface TableCard {
   readonly moreRows: boolean;
   /** 能画成图时怎么画；没有就只给表 */
   readonly chart?: TableChart;
+  /** 能下钻时哪几列能点 */
+  readonly drill?: TableDrill;
 }
 
 /** 出处：一行说明（最前面一个词，如「口径」），点开看明细与代码。 */
@@ -113,7 +124,15 @@ export interface CardAction {
   readonly ref: string;
 }
 
-export type ResultCard = TableCard | ProvenanceCard;
+/** 几个可以接着问的问题（例如查不了时的换个问法）：点了就在这个对话里问。 */
+export interface SuggestionsCard {
+  readonly type: 'suggestions';
+  readonly title?: string;
+  readonly text?: string;
+  readonly questions: readonly string[];
+}
+
+export type ResultCard = TableCard | ProvenanceCard | SuggestionsCard;
 
 /** 一次知识检索：命中的文档（来源:文档，去重）、用上的条件、用户这一轮撤掉的条件。条件的写法由业务服务给出。 */
 export interface SearchSummary {
@@ -145,6 +164,20 @@ export interface RunView {
   readonly trail: readonly TrailEntry[];
   /** 这一轮 Agent 维护的待办（官方 todo_write 的最新整表）；没写过时为 undefined。 */
   readonly todos?: readonly TodoView[];
+  /** 这一轮交付的文件（官方 present），同一路径用最近一次的说明；没交付过时为 undefined。 */
+  readonly deliverables?: readonly DeliverableView[];
+  /** 不是人发起的一轮由什么发起；人发起的没有。 */
+  readonly trigger?: RunTrigger;
+}
+
+/** 发起这一轮的不是人：定时任务到点，或后台任务、子 Agent 做完时 Agent 正空闲，官方自己开了一轮。 */
+export interface RunTrigger {
+  readonly id: string;
+  /** 官方消息来源：schedule（定时任务）、tool-jobs（后台任务完成）、subagent-settled（子 Agent 完成） */
+  readonly source: string;
+  /** 定时任务是任务的提示词，后台任务、子 Agent 是官方的一句摘要（服务端取好的） */
+  readonly text: string;
+  readonly time: number;
 }
 
 export type TodoStatus = 'pending' | 'in_progress' | 'completed';
@@ -177,6 +210,8 @@ export interface ApprovalView {
   readonly reason?: string;
   readonly runId?: string;
   readonly status: ApprovalStatus;
+  /** 按「本会话内同类操作不再询问」的授权自动批准的（官方工具自己发起、事先拦不到的那类，见宿主 approval-broker） */
+  readonly auto?: boolean;
 }
 
 export interface QuestionOptionView {
@@ -219,14 +254,12 @@ export interface QuestionView {
   readonly closedReason?: QuestionClosedReason;
 }
 
-/** 会话产物（回合结束时从沙箱 /workspace/output 收取），runId 与 events.v1 的 run_id 一致。 */
-export interface ArtifactView {
-  readonly id: string;
-  readonly name: string;
-  readonly mimeType?: string;
-  readonly size?: number;
-  readonly url?: string;
-  readonly runId?: string;
+/**
+ * 官方 present 交付的一个文件（方案 7.7.3：网页与桌面同一套）：路径照宿主给的原样（服务端会话是 /sessions/<会话>/...，
+ * 本机会话是用户电脑上的路径），按路径经对话的来源读。
+ */
+export interface DeliverableView {
+  readonly path: string;
   /** 模型交付时写的说明，卡片上显示；没写时显示文件类型 */
   readonly description?: string;
 }
@@ -273,7 +306,9 @@ export interface SentMessage {
 }
 
 export type TimelineEntry =
-  { readonly type: 'user'; readonly message: SentMessage } | { readonly type: 'run'; readonly runId: string };
+  | { readonly type: 'user'; readonly message: SentMessage }
+  | { readonly type: 'trigger'; readonly trigger: RunTrigger }
+  | { readonly type: 'run'; readonly runId: string };
 
 export type RunState = 'idle' | 'running' | 'waiting-approval';
 
@@ -291,7 +326,6 @@ export interface ChatState {
   readonly internalCalls: readonly string[];
   /** 本页提交回答时后端说已结束的提问；不来自事件流，重算时保留。 */
   readonly expiredQuestions: readonly string[];
-  readonly artifacts: readonly ArtifactView[];
   /** 本会话引用目录，按编号查出处；undefined 表示还没拉到（拉到之前不判断编号是否有效）。 */
   readonly citations?: Readonly<Record<number, CitationSource>>;
   /** 当前未结束的轮次。 */
@@ -307,10 +341,12 @@ export interface LiveText {
   readonly text: string;
   /** 这一步模型开始写了哪些工具调用（工具名，按先后）：参数还没写完、工具还没开始跑 */
   readonly tools: readonly string[];
+  /** 这一步到目前为止的思考（照 ChatGPT 边想边显示，正文开始后收起） */
+  readonly reasoning: string;
 }
 
-/** 服务端推来的一个逐字片段：offset 为 0 表示从头替换（快照还带着报过的工具）；tool 是模型开始写某个工具调用；
- * done 表示这一步输出结束。 */
+/** 服务端推来的一个逐字片段：offset 为 0 表示从头替换（快照还带着报过的工具与思考全文）；reasoning 是思考片段，
+ * 按 reasoningOffset 接着拼；tool 是模型开始写某个工具调用；done 表示这一步输出结束。 */
 export type LivePiece =
   | {
       readonly runId: string;
@@ -318,6 +354,13 @@ export type LivePiece =
       readonly offset: number;
       readonly text: string;
       readonly tools?: readonly string[];
+      readonly reasoning?: string;
+    }
+  | {
+      readonly runId: string;
+      readonly step: number;
+      readonly reasoningOffset: number;
+      readonly reasoning: string;
     }
   | { readonly runId: string; readonly step: number; readonly tool: string }
   | { readonly runId: string; readonly step: number; readonly done: true };
@@ -337,8 +380,6 @@ export type ChatAction =
   | { readonly type: 'local/failed'; readonly localId: string }
   /** 提交回答时后端说问题已结束（宿主重启过等），把卡片标成失效。 */
   | { readonly type: 'local/question-expired'; readonly questionId: string }
-  /** 从 /artifacts 拉到的本会话产物，整体替换。 */
-  | { readonly type: 'artifacts/loaded'; readonly artifacts: readonly ArtifactView[] }
   /** 从 /citations 拉到的本会话引用目录，整体替换。 */
   | { readonly type: 'citations/loaded'; readonly citations: Readonly<Record<number, CitationSource>> }
   /** 逐字片段（不来自事件日志）。 */

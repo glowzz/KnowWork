@@ -8,9 +8,17 @@ import { resultCards } from '../events/cards';
 import type { ProvenanceCard, RunView, TableCard } from '../events/types';
 import { register } from '../../../slots/registry';
 
-// 图表库在测试环境里画不出来：换成只写说明的替身，验证的是给它的说明和切换
+// 图表库在测试环境里画不出来：换成只写说明的替身，验证的是给它的说明和切换；能点时给一个「点图上的区域2」
 vi.mock('../../../ui/EChart', () => ({
-  default: ({ label }: { readonly label: string }) => <div role="img" aria-label={label} />,
+  default: ({ label, onPick }: { readonly label: string; readonly onPick?: (name: string) => void }) => (
+    <div role="img" aria-label={label}>
+      {onPick ? (
+        <button type="button" onClick={() => onPick('区域2')}>
+          点图上的区域2
+        </button>
+      ) : null}
+    </div>
+  ),
 }));
 
 const table = (rows: number, rowCount = rows): TableCard => ({
@@ -147,6 +155,160 @@ describe('卡片上的操作', () => {
   });
 });
 
+describe('卡片上的操作换掉这张卡片', () => {
+  it('操作拿到 replace：交回新的卡片协议，这张结果卡片就地换成新的，操作跟着新的查询编号', async () => {
+    register('chat.card.actions', {
+      name: 'adjust_example',
+      Component: ({ reference, replace }) => (
+        <button
+          type="button"
+          onClick={() =>
+            replace?.({
+              version: 1,
+              cards: [
+                {
+                  type: 'table',
+                  title: '订单数 · 9 月',
+                  columns: [{ name: 'n', label: '订单数', kind: 'number' }],
+                  rows: [[9]],
+                },
+                {
+                  type: 'provenance',
+                  label: '口径',
+                  text: '条件改过 · 订单数',
+                  actions: [{ name: 'adjust_example', ref: 'anql_2' }],
+                },
+              ],
+            })
+          }
+        >
+          改 {reference}
+        </button>
+      ),
+    });
+    const cards = resultCards({
+      version: 1,
+      cards: [
+        {
+          type: 'table',
+          title: '订单数 · 8 月',
+          columns: [{ name: 'n', label: '订单数', kind: 'number' }],
+          rows: [[8]],
+        },
+        {
+          type: 'provenance',
+          label: '口径',
+          text: '订单数',
+          actions: [{ name: 'adjust_example', ref: 'anql_1' }],
+        },
+      ],
+    });
+    render(<ResultCards cards={cards ?? []} />);
+    await userEvent.click(screen.getByRole('button', { name: '改 anql_1' }));
+    const card = screen.getByRole('region', { name: '订单数 · 9 月' });
+    expect(within(card).getByText('条件改过 · 订单数')).toBeInTheDocument();
+    expect(within(card).getByRole('button', { name: '改 anql_2' })).toBeInTheDocument();
+  });
+});
+
+describe('结果上点值往下钻', () => {
+  const drilled = (name: string) => ({
+    version: 1,
+    cards: [
+      {
+        type: 'table',
+        title: '订单数 · 按省份',
+        columns: [
+          { name: 'province', label: '省份' },
+          { name: 'n', label: '订单数', kind: 'number' },
+        ],
+        rows: [['浙江', 3]],
+        drill: { name, ref: 'q2', columns: ['province'] },
+      },
+      { type: 'provenance', label: '口径', text: '下钻过 · 订单数', actions: [] },
+    ],
+  });
+  const register_ = (name: string) =>
+    register('chat.card.drill', {
+      name,
+      Component: ({ reference, column, label, value, replace, onClose }) => (
+        <div role="dialog" aria-label="往下钻">
+          {`${reference} ${column} ${label} = ${String(value)}`}
+          <button type="button" onClick={() => replace(drilled(name))}>
+            按省份
+          </button>
+          <button type="button" onClick={onClose}>
+            取消
+          </button>
+        </div>
+      ),
+    });
+  const cardsOf = (extra: Record<string, unknown>, name: string) =>
+    resultCards({
+      version: 1,
+      cards: [
+        {
+          type: 'table',
+          title: '订单数 · 按区域',
+          columns: [
+            { name: 'region', label: '区域' },
+            { name: 'n', label: '订单数', kind: 'number' },
+          ],
+          rows: [
+            ['区域1', 1],
+            ['区域2', 2],
+          ],
+          drill: { name, ref: 'q1', columns: ['region', 'gone'] },
+          ...extra,
+        },
+      ],
+    }) ?? [];
+
+  it('表里能下钻那一列的取值能点：交给扩展登记的组件，换成钻好的结果，能返回上一步', async () => {
+    register_('drill_table');
+    const errors = vi.spyOn(console, 'error');
+    render(<ResultCards cards={cardsOf({}, 'drill_table')} />);
+    expect(screen.getByText('点带下划线的取值，可以往下钻')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /往下钻：订单数/ })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: '往下钻：区域 = 区域2' }));
+    expect(screen.getByRole('dialog', { name: '往下钻' })).toHaveTextContent('q1 region 区域 = 区域2');
+    await userEvent.click(screen.getByRole('button', { name: '取消' }));
+    expect(screen.queryByRole('dialog')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: '往下钻：区域 = 区域1' }));
+    await userEvent.click(screen.getByRole('button', { name: '按省份' }));
+    const card = screen.getByRole('region', { name: '订单数 · 按省份' });
+    expect(within(card).getByRole('button', { name: '往下钻：省份 = 浙江' })).toBeInTheDocument();
+    await userEvent.click(within(card).getByRole('button', { name: '返回上一步' }));
+    expect(screen.getByRole('region', { name: '订单数 · 按区域' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '返回上一步' })).toBeNull();
+    expect(screen.getAllByRole('table')).toHaveLength(1);
+    // 表和出处并排：key 重了 React 会把它们重复画出来（实机上图画了三遍、对话框关不掉）
+    expect(errors.mock.calls.flat().join(' ')).not.toMatch(/same key/);
+    errors.mockRestore();
+  });
+
+  it('图上点一项也能钻（横轴那一列能下钻时）；扩展没登记那个组件时值不能点', async () => {
+    register_('drill_chart');
+    const { unmount } = render(
+      <ResultCards cards={cardsOf({ chart: { type: 'bar', x: 'region', y: ['n'] } }, 'drill_chart')} />,
+    );
+    await userEvent.click(await screen.findByRole('button', { name: '点图上的区域2' }));
+    expect(screen.getByText('点图上的一项或表里的取值，可以往下钻')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: '往下钻' })).toHaveTextContent('q1 region 区域 = 区域2');
+    unmount();
+    render(<ResultCards cards={cardsOf({}, 'nobody_registered')} />);
+    expect(screen.queryByRole('button', { name: /往下钻/ })).toBeNull();
+    expect(screen.queryByText(/可以往下钻/)).toBeNull();
+  });
+
+  it('卡片协议里的下钻：组件名、编号都要有，列名对不上的去掉', () => {
+    const [card] = cardsOf({}, 'drill_table');
+    expect(card).toMatchObject({ drill: { name: 'drill_table', ref: 'q1', columns: ['region'] } });
+    const [bare] = cardsOf({ drill: { name: 'x', columns: ['region'] } }, 'x');
+    expect(bare && 'drill' in bare ? bare.drill : undefined).toBeUndefined();
+  });
+});
+
 describe('回答里的卡片', () => {
   it('画在回答正文之后，按步骤顺序；没结束的步骤不画', () => {
     const run: RunView = {
@@ -184,7 +346,6 @@ describe('回答里的卡片', () => {
         run={run}
         approvals={[]}
         questions={[]}
-        artifacts={[]}
         onDecide={vi.fn()}
         onAnswer={vi.fn(async () => true)}
         busy={false}
@@ -224,7 +385,6 @@ describe('回答里的卡片', () => {
         run={run}
         approvals={[]}
         questions={[]}
-        artifacts={[]}
         onDecide={vi.fn()}
         onAnswer={vi.fn(async () => true)}
         busy={false}
@@ -300,6 +460,87 @@ describe('回答里的卡片', () => {
     expect(within(screen.getByRole('banner')).queryByRole('radiogroup', { name: '图形' })).toBeNull();
   });
 
+  it('同一组的几列数值画在一起，图上面一排是图例；还有别的组时在组之间切换', async () => {
+    const plan: TableCard = {
+      type: 'table',
+      columns: [
+        { name: 'month', label: '月份', kind: 'date' },
+        { name: 'revenue', label: '营收', kind: 'number' },
+        { name: 'target', label: '目标', kind: 'number' },
+        { name: 'n', label: '订单数', kind: 'number' },
+      ],
+      rows: [
+        ['2026-01', 50.8, 56.4, 1200],
+        ['2026-02', 53.5, 59.4, 1300],
+      ],
+      rowCount: 2,
+      moreRows: false,
+      chart: { type: 'line', x: 'month', y: ['revenue', 'target'], groups: [['revenue', 'target']] },
+    };
+    const { unmount } = render(<ResultCards cards={[plan]} />);
+    expect(await screen.findByRole('img', { name: '营收、目标按月份的折线图' })).toBeInTheDocument();
+    const legend = screen.getByRole('list', { name: '图例' });
+    expect(
+      within(legend)
+        .getAllByRole('listitem')
+        .map((li) => li.textContent),
+    ).toEqual(['营收', '目标']);
+    expect(screen.queryByRole('radiogroup', { name: '画哪一列' })).toBeNull();
+    unmount();
+    const mixed: TableCard = {
+      ...plan,
+      chart: {
+        type: 'line',
+        x: 'month',
+        y: ['revenue', 'target', 'n'],
+        groups: [['revenue', 'target'], ['n']],
+      },
+    };
+    const changed = vi.fn();
+    render(
+      <ResultCards cards={[mixed]} chartPreference={{ metric: 'target' }} onChartPreference={changed} />,
+    );
+    expect(await screen.findByRole('img', { name: '营收、目标按月份的折线图' })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: '营收、目标' })).toBeChecked();
+    await userEvent.click(screen.getByRole('radio', { name: '订单数' }));
+    expect(await screen.findByRole('img', { name: '订单数按月份的折线图' })).toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: '图例' })).toBeNull();
+    expect(changed).toHaveBeenLastCalledWith({ type: 'line', metric: 'n' });
+  });
+  it('调用方能给看图的初始设置、换了告诉它（看板记住卡片上换过的图形、画哪一列、图还是表）', async () => {
+    const chartTable: TableCard = {
+      ...table(3),
+      columns: [
+        { name: 'region', label: '区域' },
+        { name: 'n', label: '订单数', kind: 'number' },
+        { name: 'amount', label: '金额', kind: 'number' },
+      ],
+      rows: [
+        ['华东', 3, 300],
+        ['华南', 2, 200],
+      ],
+      chart: { type: 'bar', x: 'region', y: ['n', 'amount'] },
+    };
+    const changed = vi.fn();
+    const { unmount } = render(
+      <ResultCards
+        cards={[chartTable]}
+        chartPreference={{ type: 'pie', metric: 'amount' }}
+        onChartPreference={changed}
+      />,
+    );
+    expect(await screen.findByRole('img', { name: '金额按区域的饼图' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('radio', { name: '订单数' }));
+    expect(changed).toHaveBeenLastCalledWith({ type: 'pie', metric: 'n' });
+    await userEvent.click(screen.getByRole('radio', { name: '柱状' }));
+    expect(changed).toHaveBeenLastCalledWith({ type: 'bar', metric: 'n' });
+    await userEvent.click(screen.getByRole('radio', { name: '表' }));
+    expect(changed).toHaveBeenLastCalledWith({ type: 'bar', metric: 'n', view: 'table' });
+    unmount();
+    render(<ResultCards cards={[chartTable]} chartPreference={{ view: 'table', metric: 'nope' }} />);
+    expect(screen.getByRole('table')).toBeInTheDocument();
+  });
+
   it('卡片协议里的「怎么画」：列名对不上就不带图', () => {
     const base = {
       type: 'table',
@@ -311,10 +552,52 @@ describe('回答里的卡片', () => {
       cards: [{ ...base, chart: { type: 'bar', x: 'region', y: ['n'] } }],
     });
     expect(parsed?.[0]).toMatchObject({ chart: { type: 'bar', x: 'region', y: ['n'] } });
+    const twoColumns = {
+      ...base,
+      columns: [...base.columns, { name: 'm', kind: 'number' }],
+      rows: [['华东', 1, 2]],
+    };
+    const grouped = resultCards({
+      version: 1,
+      cards: [{ ...twoColumns, chart: { type: 'bar', x: 'region', y: ['n', 'm'], groups: [['n', 'm']] } }],
+    });
+    expect(grouped?.[0]).toMatchObject({ chart: { y: ['n', 'm'], groups: [['n', 'm']] } });
+    const loose = resultCards({
+      version: 1,
+      cards: [{ ...twoColumns, chart: { type: 'bar', x: 'region', y: ['n', 'm'], groups: [['n']] } }],
+    });
+    expect(loose?.[0]).toMatchObject({ chart: { y: ['n', 'm'] } });
+    expect((loose?.[0] as TableCard).chart).not.toHaveProperty('groups');
     const wrong = resultCards({
       version: 1,
       cards: [{ ...base, chart: { type: 'bar', x: 'nope', y: ['n'] } }],
     });
     expect(wrong?.[0]).not.toHaveProperty('chart');
+  });
+});
+
+describe('接着问的建议（suggestions 卡片）', () => {
+  it('写明原因，问题点了就在这个对话里问；没给发问的入口（运行详情里）只列出来', async () => {
+    const parsed = resultCards({
+      version: 1,
+      cards: [
+        {
+          type: 'suggestions',
+          title: '这个问题查不了',
+          text: '模型里没有「提成」这个指标',
+          questions: ['各区域的成交金额', '各销售渠道的成交金额'],
+        },
+      ],
+    })!;
+    const asked: string[] = [];
+    const { unmount } = render(<ResultCards cards={parsed} onAsk={(text) => asked.push(text)} />);
+    const card = screen.getByRole('region', { name: '这个问题查不了' });
+    expect(within(card).getByText('模型里没有「提成」这个指标')).toBeInTheDocument();
+    await userEvent.click(within(card).getByRole('button', { name: '各销售渠道的成交金额' }));
+    expect(asked).toEqual(['各销售渠道的成交金额']);
+    unmount();
+    render(<ResultCards cards={parsed} />);
+    expect(screen.getByText('各区域的成交金额')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '各区域的成交金额' })).not.toBeInTheDocument();
   });
 });

@@ -1,4 +1,5 @@
-"""身份的公开接口：登录登出、当前用户、登录方式列表、邀请注册、API Key、单点登录（OIDC、OAuth2）。
+"""身份的公开接口：登录登出、当前用户、登录方式列表、邀请注册、API Key、单点登录（OIDC、OAuth2）、
+原生应用登录（桌面端等，oauth_routes.py）。
 
 邀请与查找账号按工作空间（/api/workspaces/{ws}/invitations、/api/workspaces/{ws}/users），
 「是不是这个空间的管理员」由调用方注入（身份模块不认识空间）；默认谁都不是。
@@ -17,6 +18,7 @@ from ..auth.principal import Principal
 from .container import Identity, unauthorized
 from .errors import EmailTaken, InvalidInput, InvalidInvitation, NotAllowed, SsoFailure
 from .hooks import Placement
+from .oauth_routes import add_oauth_routes
 from .schemas import AcceptInviteBody, CreateApiKeyBody, DirectoryLoginBody, InviteBody, LoginBody, api_key_view
 from .sessions import IssuedSession
 from .sso_routes import add_sso_routes
@@ -57,7 +59,9 @@ async def _holds(check: WorkspaceCheck, principal: Principal, workspace_id: str)
 
 
 def build_router(identity: Identity, *, is_admin: WorkspaceCheck = _no_workspace,
-                 can_bind_workspace: WorkspaceCheck = _no_workspace) -> APIRouter:
+                 can_bind_workspace: WorkspaceCheck = _no_workspace, extensions: tuple[str, ...] = ()) -> APIRouter:
+    """extensions：本部署启用了的扩展名（按授权），随当前用户信息给前端：前端只显示启用了的扩展的入口，
+    装了扩展、没授权的不在侧栏留一个点开就加载失败的菜单。"""
     router = APIRouter(prefix="/api/auth")
     workspace = APIRouter(prefix="/api/workspaces/{workspace_id}")
     Who = Annotated[Principal, Depends(identity.get_principal)]
@@ -133,7 +137,7 @@ def build_router(identity: Identity, *, is_admin: WorkspaceCheck = _no_workspace
         if user is None:
             raise unauthorized()
         scopes = sorted(who.scopes) if who.scopes is not None else None
-        return {**_user_view(user), "authMethod": who.auth_method, "scopes": scopes}
+        return {**_user_view(user), "authMethod": who.auth_method, "scopes": scopes, "extensions": list(extensions)}
 
     @workspace.post("/invitations", status_code=201)
     async def invite(workspace_id: WorkspacePath, body: InviteBody, who: Who):
@@ -229,6 +233,7 @@ def build_router(identity: Identity, *, is_admin: WorkspaceCheck = _no_workspace
         return PlainTextResponse(content)
 
     add_sso_routes(router, identity, set_session_cookie)
+    add_oauth_routes(router, identity)
     combined = APIRouter()
     combined.include_router(router)
     combined.include_router(workspace)

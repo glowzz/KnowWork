@@ -23,6 +23,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 COPY server/src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable
+# 桌面端扩展（extensions/desktop）：构建参数 KNOWWORK_BUILD_DESKTOP=1 才装——装上后原生应用的授权
+# 与换令牌端点、设备对话的公开入口即生效（没装的开源部署不受影响）。装在最后一次 uv sync 之后
+# （sync 会把 venv 修剪回锁内的清单）。见 docs/desktop.md 的 M6。
+ARG KNOWWORK_BUILD_DESKTOP=""
+COPY extensions /extensions
+RUN --mount=type=cache,target=/root/.cache/uv \
+    if [ "$KNOWWORK_BUILD_DESKTOP" = "1" ]; then \
+      uv pip install --python /opt/venv/bin/python --no-deps /extensions/desktop; \
+    fi \
+ && rm -rf /extensions
 
 # hadolint ignore=DL3006
 FROM ${PYTHON_IMAGE} AS runtime

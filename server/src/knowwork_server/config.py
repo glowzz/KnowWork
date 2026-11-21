@@ -77,6 +77,14 @@ class Settings(BaseSettings):
     public_port: int = Field(default=8000, ge=1, le=65535)
     internal_host: str = "0.0.0.0"
     internal_port: int = Field(default=8001, ge=1, le=65535)
+    # 编辑器端口（可选）：扩展提供的在线编辑器要一个和本站分开的来源（编辑器的路径写死在站点根上，渲染的又是
+    # 不可信的文档，不该和本站同源），网关给它单独的端口或子域名再转到这里。不设就不开；设了但没有扩展提供编辑器也不开。
+    editor_host: str = "0.0.0.0"
+    editor_port: int | None = Field(default=None, ge=1, le=65535)
+    # 独立的模型网关进程（ops/model_gateway.py）：宿主调模型经它，不记状态，忙不过来就多开几个 worker 进程
+    model_gateway_host: str = "0.0.0.0"
+    model_gateway_port: int = Field(default=8002, ge=1, le=65535)
+    model_gateway_workers: int = Field(default=1, ge=1, le=32)
     # worker 连业务服务内部端口的地址：扩展经它替用户发起后台对话（conversations/background.py）
     internal_url: str = "http://127.0.0.1:8001"
 
@@ -111,6 +119,8 @@ class Settings(BaseSettings):
     public_base_url: str = "http://localhost"
     # 会话 Cookie 只走 HTTPS；本机 http 调试时才关掉。
     cookie_secure: bool = True
+    # 网页嵌入的限次计数（channels/limits.py）用的 Redis，同 worker 的 KNOWWORK_REDIS_URL；为空时只在进程内计（本机开发）
+    redis_url: str = ""
     tool_token_ttl_seconds: int = Field(default=900, ge=60, le=3600)
     # 工具令牌续期：单次签发 / 轮换的超时与一轮内的并发上限。
     tool_token_call_timeout_seconds: float = Field(default=10.0, gt=0, le=60)

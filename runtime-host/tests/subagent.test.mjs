@@ -2,17 +2,18 @@
  * 官方子 Agent 在宿主会话里打开，并按父会话继承策略：工具收窄、业务工具、审批、事件。
  *
  * 父子两个 Agent 的模型请求会并发到达，按到达顺序编排不确定，所以用 openai-stub 的 pick
- * 按请求内容区分角色（官方给子 Agent 的首条消息里带「Your parent agent id is」），各自按自己的请求次数出回答。
+ * 按请求内容区分角色（官方给子 Agent 的首条任务消息后面固定跟一段交付说明「Your final answer is delivered automatically」，
+ * 0.2.2-rc.2 起；之前是「Your parent agent id is」），各自按自己的请求次数出回答。
  */
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { startHost, collectEvents } from './support/harness.mjs'
+import { startHost, collectEvents, isApprovalAsked, approvalEvent, pendingApprovals } from './support/harness.mjs'
 import { startOpenAiStub } from './support/openai-stub.mjs'
 import { bizTool, startToolsStub } from './support/tools-stub.mjs'
 
 const TOKEN = 'tools-token-sub-'.padEnd(40, 's')
-const DELEGATION = 'Your parent agent id is'
+const DELEGATION = 'Your final answer is delivered automatically'
 const isChildRequest = body => JSON.stringify(body).includes(DELEGATION)
 const toolNamesOf = body => (body?.tools ?? []).map(t => t.function?.name)
 const subagentEvent = type => f => f.kind === 'subagent/event' && f.data.event?.type === type
@@ -89,13 +90,15 @@ test('子 Agent 里需要审批的工具：审批出现在父会话的审批列�
   try {
     await env.host.call('POST', '/v1/sessions', { sessionId: 'sub-appr' })
     await env.host.call('POST', '/v1/sessions/sub-appr/messages', { text: '让子 Agent 写台账' })
-    const asked = await collectEvents(env.host, 'sub-appr', f => f.kind === 'approval/requested', { timeoutMs: 30_000 })
-    const requested = asked.find(f => f.kind === 'approval/requested').data
-    assert.notEqual(requested.sessionId, 'sub-appr', '审批应当来自子会话')
-    const pending = (await env.host.call('GET', '/v1/sessions/sub-appr/approvals')).body
+    const asked = await collectEvents(env.host, 'sub-appr', isApprovalAsked, { timeoutMs: 30_000 })
+    const frame = asked.at(-1)
+    assert.equal(frame.kind, 'subagent/event', '子 Agent 的审批记在它自己的日志里，转发到父会话的流')
+    assert.notEqual(frame.data.sessionId, 'sub-appr', '审批应当来自子会话')
+    const pending = await pendingApprovals(env.host, 'sub-appr')
     assert.equal(pending.length, 1)
     assert.equal(pending[0].toolName, 'kw_write')
-    assert.equal(pending[0].sessionId, requested.sessionId)
+    assert.equal(pending[0].sessionId, frame.data.sessionId)
+    assert.equal(pending[0].id, approvalEvent(frame, 'approval/asked').id, '待答项用子会话日志里的官方编号')
     assert.equal((await env.host.call('POST', `/v1/sessions/sub-appr/approvals/${pending[0].id}`, { outcome: 'allowed-once' })).status, 200)
     await collectEvents(env.host, 'sub-appr', subagentEvent('turn/end'), { after: asked.at(-1).cursor, timeoutMs: 30_000 })
     const followup = env.childRequests()[1]
@@ -111,7 +114,8 @@ test('父会话释放时，子会话的待决审批随之取消，写入不执�
   try {
     await env.host.call('POST', '/v1/sessions', { sessionId: 'sub-rej' })
     await env.host.call('POST', '/v1/sessions/sub-rej/messages', { text: '让子 Agent 写台账' })
-    await collectEvents(env.host, 'sub-rej', f => f.kind === 'approval/requested', { timeoutMs: 30_000 })
+    await collectEvents(env.host, 'sub-rej', isApprovalAsked, { timeoutMs: 30_000 })
+    await pendingApprovals(env.host, 'sub-rej')
     const started = Date.now()
     assert.equal((await env.host.call('DELETE', '/v1/sessions/sub-rej')).status, 200)
     assert.ok(Date.now() - started < 10_000, '释放被子会话的待决审批卡住')

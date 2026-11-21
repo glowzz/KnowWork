@@ -10,6 +10,7 @@ from ..access.rls import set_workspace
 from ..conversations.models import Conversation
 from ..sessionfiles.storage import SessionStores
 from ..skills.errors import BlobIntegrityError
+from ..workpath import WorkPath
 from .collector import ArtifactView, artifact_view
 from .models import Artifact
 
@@ -44,6 +45,14 @@ class ArtifactService:
 
     async def list(self, conversation: Conversation) -> tuple[ArtifactView, ...]:
         return tuple(artifact_view(row) for row in await self._rows(conversation))
+
+    async def delivered_at(self, conversation: Conversation, path: WorkPath) -> ArtifactView | None:
+        """工作区里这个路径最近收下的一版（交付或人存盘）；没有是 None。
+        早先收的产物没记路径（source_path 为空）：按文件名认，旧对话的交付卡片在沙箱回收后照样打得开。"""
+        rows = await self._rows(conversation, Artifact.source_path == path.relative)
+        if not rows:
+            rows = await self._rows(conversation, Artifact.source_path.is_(None), Artifact.filename == path.name)
+        return artifact_view(rows[-1]) if rows else None
 
     async def open(self, conversation: Conversation, artifact_id: str) -> ArtifactContent:
         rows = await self._rows(conversation, Artifact.id == artifact_id)

@@ -10,9 +10,11 @@ from ..db.base import Base
 
 USER_ACTIVE = "active"
 USER_DISABLED = "disabled"
-# 账号种类：person 是人；channel 是渠道账号（IM 机器人用它的身份回答，没有密码、不能登录、不在成员与选人列表里）
+# 账号种类：person 是人；channel 是渠道账号（IM 机器人用它的身份回答，没有密码、不能登录、不在成员与选人列表里）；
+# external 是网页嵌入的认证访问自动建的外部用户（接入方系统认出的人，没有邮箱与密码，只能从那个渠道进来，channels/web_identity.py）
 USER_PERSON = "person"
 USER_CHANNEL = "channel"
+USER_EXTERNAL = "external"
 
 
 class User(Base):
@@ -20,7 +22,7 @@ class User(Base):
     __table_args__ = (
         CheckConstraint("email = lower(email)", name="ck_user_email_lower"),
         CheckConstraint("status in ('active', 'disabled')", name="ck_user_status"),
-        CheckConstraint("kind in ('person', 'channel')", name="ck_user_kind"),
+        CheckConstraint("kind in ('person', 'channel', 'external')", name="ck_user_kind"),
     )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
@@ -145,3 +147,45 @@ class LoginProvider(Base):
     secret_last4: Mapped[str] = mapped_column(String(4), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class OAuthGrant(Base):
+    """一次原生应用登录（「已登录的设备」里的一行）：当前这一对访问令牌与刷新令牌只存摘要。
+
+    刷新时两个令牌一起换新（轮换）；上一个刷新令牌的摘要留着：有人再拿它来换，说明被人拿去用过，
+    整次登录作废（OAuth 2.0 安全最佳实践的刷新令牌轮换与重用检测）。"""
+
+    __tablename__ = "oauth_grant"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"), index=True)
+    client_id: Mapped[str] = mapped_column(String(64))
+    device_name: Mapped[str] = mapped_column(String(100), default="")
+    # 应用报的设备号（自己生成、长期不变），没报为空串；见 oauth.py 的 _DEVICE_ID
+    device_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    access_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    access_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    refresh_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    previous_refresh_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    refresh_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OAuthCode(Base):
+    """授权码：一次性、很快过期；记下批准时的回调地址与 PKCE 挑战，换令牌时逐项核对。
+    用过的码留到过期：再拿来换说明码被截走过，把它换出的那次登录作废（RFC 6749 4.1.2）。"""
+
+    __tablename__ = "oauth_code"
+
+    code_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    client_id: Mapped[str] = mapped_column(String(64))
+    user_id: Mapped[str] = mapped_column(ForeignKey("user.id", ondelete="CASCADE"))
+    redirect_uri: Mapped[str] = mapped_column(String(300))
+    code_challenge: Mapped[str] = mapped_column(String(128))
+    device_name: Mapped[str] = mapped_column(String(100), default="")
+    # 应用报的设备号（自己生成、长期不变），没报为空串；见 oauth.py 的 _DEVICE_ID
+    device_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    grant_id: Mapped[str | None] = mapped_column(String(32), nullable=True)

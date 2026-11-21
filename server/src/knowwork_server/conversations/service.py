@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from typing import Protocol, TypeVar
 
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from ..kernel.contract import (
@@ -30,11 +31,13 @@ from ..kernel.contract import (
     CancelResult,
     KernelError,
     KnowledgeCatalog,
+    ModelUnknown,
     PendingApproval,
     PendingQuestion,
     QuestionAnswer,
     SessionBusy,
     SessionNotFound,
+    SessionOwner,
     SessionPolicy,
     SessionSpec,
     TurnAttachment,
@@ -42,16 +45,22 @@ from ..kernel.contract import (
 )
 from ..profile.snapshot import NO_SELECTION, RuntimeProfile, TurnSelection
 from .answer_modes import AnswerModes, ModeContext
+from .constants import DEVICE_SOURCE
 from .mention_kinds import MentionKinds
 from .models import Conversation, RunEvent
 from .pump import EventPump
+from .quota import QuotaPolicies, Trigger, TurnStart
 from .replay import Cursor, EventFeed, Outgoing
+from .scopes import ConversationScopes, ScopeClaim
 from .search import SearchHit, search_conversations
 from .tool_credentials import ToolCredentials
 from .turn_context import TurnContextHook, TurnContextRequest
+from .turn_state import TurnStateHook, TurnStateRequest
 
 # 删除会话时一并清掉的关联数据（引用目录、动作回执等），由装配方按模块给出
 Eraser = Callable[[Conversation], Awaitable[None]]
+# 用户要发消息前预热的东西（会话沙箱容器等），由装配方按模块给出；没配沙箱的部署没有
+Warmer = Callable[[Conversation], Awaitable[None]]
 MAX_PAGE = 100
 
 
@@ -59,6 +68,14 @@ MAX_PAGE = 100
 class ConversationPage:
     items: tuple[Conversation, ...]
     next: datetime | None
+
+
+@dataclass(frozen=True)
+class DeviceTurn:
+    """在设备上执行的对话这一轮的合同：开会话（设备上的宿主没开着、开着的配置不同就按它对齐；插话时没有）与这一轮。"""
+
+    session: SessionSpec | None
+    turn: TurnInput
 
 log = logging.getLogger(__name__)
 
@@ -72,8 +89,20 @@ KnowledgeCatalogOf = Callable[[Conversation, RuntimeProfile], Awaitable[Knowledg
 T = TypeVar("T")
 
 
+async def _nothing() -> None:
+    """恢复打开之后不用再做什么（激活、预热只要宿主上开着这段对话）。"""
+
+
 class ConversationNotFound(Exception):
     pass
+
+
+class RunsOnDevice(Exception):
+    """这段对话在用户设备上执行（device.py）：发消息、停止、审批、回答交给那台设备的本机宿主，业务服务不接。"""
+
+
+class ConversationExists(Exception):
+    """指定的对话 id 已经有了（扩展建后台对话时指定 id，见 background.py 的 LocalBackground）。"""
 
 
 class ProfileProvider(Protocol):
@@ -88,6 +117,18 @@ class ProfileProvider(Protocol):
 
 class AttachmentUnavailable(Exception):
     """本轮要带的附件不属于这个会话、还没放进沙箱或已失效。message 可以直接给用户看。"""
+
+
+class UnknownModel(Exception):
+    """输入框选的模型不存在、停用了，或不是对话模型。"""
+
+
+class TurnModels(Protocol):
+    """输入框能选的对话模型（models.host_sync.HostModelSync 满足它）：核对选的模型，宿主不认识时重推清单。"""
+
+    async def choosable(self, alias: str) -> bool: ...
+
+    async def push(self) -> None: ...
 
 
 class AttachmentSource(Protocol):
@@ -109,13 +150,18 @@ class ConversationService:
                  tool_credentials: ToolCredentials | None = None,
                  skill_credentials: ToolCredentials | None = None,
                  erasers: tuple[Eraser, ...] = (),
+                 warmers: tuple[Warmer, ...] = (),
                  profiles: ProfileProvider | None = None,
                  grants: GrantRecorder | None = None,
                  attachments: AttachmentSource | None = None,
                  knowledge_catalog: KnowledgeCatalogOf | None = None,
                  turn_context: TurnContextHook | None = None,
+                 turn_state: TurnStateHook | None = None,
                  answer_modes: AnswerModes | None = None,
                  mention_kinds: MentionKinds | None = None,
+                 scopes: ConversationScopes | None = None,
+                 quota: QuotaPolicies | None = None,
+                 models: TurnModels | None = None,
                  resume_retry_delays: tuple[float, ...] = RESUME_RETRY_DELAYS) -> None:
         self._kernel = kernel
         self._sessionmaker = sessionmaker
@@ -123,19 +169,24 @@ class ConversationService:
         self._feed = feed
         self._on_host_restart = on_host_restart
         self._refresh_model_credential = refresh_model_credential
+        self._models = models
         self._resume_retry_delays = resume_retry_delays
         self._tool_credentials = tool_credentials
         self._skill_credentials = skill_credentials
         self._erasers = erasers
+        self._warmers = warmers
         self._profiles = profiles
         self._grants = grants
         self._attachments = attachments
         self._knowledge_catalog = knowledge_catalog
         self._turn_context = turn_context
+        self._turn_state = turn_state
         # 扩展在服务建好之后才登记（app.py）：登记表这时是空的，不能用 or——MentionKinds 空时为假，会换成另一个空表，
         # 后来登记的 @ 类型这里就看不到（@ 了数据源报「不认识这种 @」）
         self._answer_modes = answer_modes if answer_modes is not None else AnswerModes()
         self._mention_kinds = mention_kinds if mention_kinds is not None else MentionKinds()
+        self._scopes = scopes if scopes is not None else ConversationScopes()
+        self._quota = quota if quota is not None else QuotaPolicies()
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 
     @staticmethod
@@ -161,7 +212,8 @@ class ConversationService:
         if self._skill_credentials is not None:
             skills_token = await self._skill_credentials.token_for(conversation)
         return SessionSpec(session_id=conversation.id, policy=self.policy_for(profile), resume=resume,
-                           tools_token=token, skills_token=skills_token)
+                           tools_token=token, skills_token=skills_token,
+                           owner=SessionOwner(workspace_id=conversation.workspace_id, user_id=conversation.user_id))
 
     def _opened(self, conversation: Conversation) -> None:
         for credentials in (self._tool_credentials, self._skill_credentials):
@@ -169,22 +221,72 @@ class ConversationService:
                 credentials.track(conversation)
 
     async def create(self, *, workspace_id: str, user_id: str, title: str = "",
-                     selection: TurnSelection = NO_SELECTION, background: bool = False) -> Conversation:
-        conversation = Conversation(id=f"c_{uuid.uuid4().hex}", workspace_id=workspace_id, user_id=user_id, title=title,
-                                    background=background)
+                     selection: TurnSelection = NO_SELECTION, background: bool = False,
+                     channel_id: str | None = None, source: str = "", conversation_id: str | None = None,
+                     answer_mode: str | None = None, scope: ScopeClaim | None = None) -> Conversation:
+        """channel_id、source：从 IM 渠道来的会话记下渠道与平台（channels/service.py），「最近」里打来源标记。
+        conversation_id：扩展建后台对话时可以指定，拿自己的记录对上对话；已有同 id 的抛 ConversationExists。
+        answer_mode：第一轮的回答方式。不进下拉的（只在扩展页面里用，例如扩展页面右栏里的对话）开的对话不进「最近」和搜索，
+        同后台对话：聊天页的下拉里没有这种方式，在那里打开接着发会换成别的方式答；链接照样能打开。
+        scope：要挂的东西（例如专家，scopes.py）：建出对话后、编译运行配置前挂上，挂不上抛 ScopeRejected、对话收回。"""
+        hidden = background or (answer_mode is not None and not self._answer_modes.listed(answer_mode))
+        conversation = Conversation(id=conversation_id or f"c_{uuid.uuid4().hex}", workspace_id=workspace_id,
+                                    user_id=user_id, title=title, background=hidden, channel_id=channel_id,
+                                    source=source)
         async with self._sessionmaker() as session:
+            if conversation_id is not None and await session.get(Conversation, conversation_id) is not None:
+                raise ConversationExists(conversation_id)
             session.add(conversation)
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError as error:  # 别的空间有同 id 的（行级安全下看不见），主键撞上
+                raise ConversationExists(conversation.id) from error
         try:
+            if scope is not None:
+                await self._scopes.claim(workspace_id, conversation.id, user_id, scope)
             profile = await self._profile(conversation, selection)
             await self._kernel.open_session(await self._spec(conversation, resume=False, profile=profile))
             await self._bind(conversation, profile)
         except BaseException:
+            if scope is not None:
+                await self._scopes.release(workspace_id, conversation.id)
             await self._forget(conversation.id)
             raise
         self._opened(conversation)
         self._pump.ensure(conversation.id, workspace_id)
         return conversation
+
+    async def create_on_device(self, *, workspace_id: str, user_id: str, title: str = "",
+                               scope: ScopeClaim | None = None) -> Conversation:
+        """建一条在用户设备上执行的对话（device.py）：只有这一行，不开宿主会话、不起事件泵、不续令牌。
+        scope 同 create：建出来就挂上，挂不上抛 ScopeRejected、对话收回。"""
+        conversation = Conversation(id=f"c_{uuid.uuid4().hex}", workspace_id=workspace_id, user_id=user_id,
+                                    title=" ".join(title.split())[:200], source=DEVICE_SOURCE)
+        async with self._sessionmaker() as session:
+            session.add(conversation)
+            await session.commit()
+            await session.refresh(conversation)
+        if scope is not None:
+            try:
+                await self._scopes.claim(workspace_id, conversation.id, user_id, scope)
+            except BaseException:
+                await self._scopes.release(workspace_id, conversation.id)
+                await self._forget(conversation.id)
+                raise
+        return conversation
+
+    def _host(self, conversation: Conversation) -> AgentKernel:
+        """要在我们宿主上做的事都经这里拿内核（发消息、停止、审批、回答、激活、释放）。在设备上执行的对话（device.py）抛
+        RunsOnDevice：它在宿主上没有会话，不能悄悄去宿主上找一个、开一个。新加碰宿主的操作也从这里拿，不用各自记得判断在哪执行
+        （tests/test_device_conversations.py 把每个公开方法对设备上的对话都过一遍，钉住不碰宿主）。"""
+        if self._on_device(conversation):
+            raise RunsOnDevice(conversation.id)
+        return self._kernel
+
+    @staticmethod
+    def _on_device(conversation: Conversation) -> bool:
+        """在用户设备上执行：宿主上没有它的会话，预热、跟事件、待审批与待回答、释放这几样对它都没有要做的。"""
+        return conversation.source == DEVICE_SOURCE
 
     async def _forget(self, conversation_id: str) -> None:
         try:
@@ -224,28 +326,150 @@ class ConversationService:
 
     async def send(self, conversation: Conversation, turn: TurnInput,
                    selection: TurnSelection = NO_SELECTION, attachment_ids: tuple[str, ...] = ()) -> str:
-        if attachment_ids:
-            if self._attachments is None:
-                raise AttachmentUnavailable("附件功能没有开启")
-            turn = turn.model_copy(update={"attachments": await self._attachments.for_turn(conversation, attachment_ids)})
-        turn = await self._with_mentions(conversation, turn)
-        turn = await self._with_answer_mode(conversation, turn)
-        lock = self._lock(conversation.id)
-        async with lock:
+        """发一轮：准备（和设备上执行的对话共用，见 prepare_on_device）再送给我们的宿主。"""
+        self._host(conversation)  # 设备上执行的对话在这里就拒绝，后面的步骤都在宿主上
+        # 额度最先判：认领附件会把附件挂进这段对话、放进沙箱，额度用完被拦的一轮不该先占掉附件
+        await self._within_quota(conversation)
+        turn = await self._checked(conversation, turn, await self._attached(conversation, attachment_ids))
+        async with self._lock(conversation.id):
             profile = await self._profile(conversation, selection)
             # 插话（steer）发生在进行中的回合里，重开或改绑定都会打断它：新配置留到下一轮生效，执行时的重判照样拦得住
             if profile is not None and turn.mode == "followup":
                 await self._follow(conversation, profile)
             await self._refresh_credentials(conversation)
-            turn = await self._with_catalog(conversation, turn, profile)
-            turn = await self._with_context(conversation, turn)
+            turn = await self._packed(conversation, turn, profile)
             try:
-                message_id = await self._kernel.send(conversation.id, turn)
-            except SessionNotFound:
-                message_id = await self._resume_and_send(conversation, turn, profile)
+                message_id = await self._deliver(conversation, turn, profile)
+            except ModelUnknown:
+                # 宿主还没收到这个模型（刚重启、还没推清单）：推一次再发；再不认识就让调用方报错
+                if self._models is None:
+                    raise
+                await self._models.push()
+                message_id = await self._deliver(conversation, turn, profile)
         await self._touch(conversation.id)
         self._pump.ensure(conversation.id, conversation.workspace_id)
         return message_id
+
+    async def prepare_on_device(self, conversation: Conversation, turn: TurnInput,
+                                selection: TurnSelection = NO_SELECTION) -> DeviceTurn:
+        """在设备上执行的对话开始一轮（device.py）：和 send 同一套准备——核对模型、回答方式与 @，编译并绑定这一轮的运行配置
+        （检索工具经工具桥执行时按它收窄），带上知识库目录与扩展补的上下文——只是不送给我们的宿主，把合同交回去，由设备原样
+        交给它本机宿主里同一个收件逻辑。附件在设备上另有来源（本机文件），这里不收。"""
+        if not self._on_device(conversation):
+            raise ValueError("这段对话不在设备上执行")
+        await self._within_quota(conversation)
+        turn = await self._checked(conversation, turn, ())
+        async with self._lock(conversation.id):
+            profile = await self._profile(conversation, selection)
+            session = None
+            # 插话进的是设备上正在跑的那一轮：同云端，不动会话、不改绑定
+            if turn.mode == "followup":
+                await self._rebind(conversation, profile)
+                session = await self._device_spec(conversation, profile)
+            turn = await self._packed(conversation, turn, profile)
+        await self._touch(conversation.id)
+        return DeviceTurn(session=session, turn=turn)
+
+    async def device_session(self, conversation: Conversation) -> SessionSpec:
+        """在设备上执行的对话怎么开会话（设备刚建好这段对话时要）：按这个人此刻的运行配置编译并绑定。"""
+        if not self._on_device(conversation):
+            raise ValueError("这段对话不在设备上执行")
+        async with self._lock(conversation.id):
+            profile = await self._profile(conversation, NO_SELECTION)
+            await self._rebind(conversation, profile)
+            return await self._device_spec(conversation, profile)
+
+    async def _device_spec(self, conversation: Conversation, profile: RuntimeProfile | None) -> SessionSpec:
+        """设备上的开会话合同：令牌不在里面（设备按对话自己换，业务服务签的令牌只给我们的宿主用）。resume 同云端恢复打开的
+        规矩：业务服务已经收到过回合的，设备上找不到会话记录时报错，不悄悄新开、丢掉前面的上下文。"""
+        return SessionSpec(session_id=conversation.id, policy=self.policy_for(profile),
+                           resume=await self._has_turns(conversation.id),
+                           owner=SessionOwner(workspace_id=conversation.workspace_id, user_id=conversation.user_id))
+
+    async def _rebind(self, conversation: Conversation, profile: RuntimeProfile | None) -> None:
+        """配置版本和绑定的不同才改绑定（设备上的对话没有宿主会话要重开：开会话的合同每轮随这一轮交回，设备按它对齐）。"""
+        if profile is None or self._profiles is None:
+            return
+        bound = await self._profiles.bound(conversation)
+        if bound is None or bound.version != profile.version:
+            await self._bind(conversation, profile)
+
+    async def _within_quota(self, conversation: Conversation, *, trigger: Trigger = "user") -> None:
+        """开始一轮之前问扩展登记的额度判定（conversations/quota.py），超了抛 QuotaExceeded。放在一切有副作用的准备之前
+        （认领附件、@ 的绑定、开宿主会话），被拦的一轮什么都不留下；用完了后面的也不用算。没登记判定时什么都不调。"""
+        await self._quota.before_turn(TurnStart(workspace_id=conversation.workspace_id, user_id=conversation.user_id,
+                                                conversation_id=conversation.id, trigger=trigger))
+
+    async def _attached(self, conversation: Conversation, ids: tuple[str, ...]) -> tuple[TurnAttachment, ...]:
+        if not ids:
+            return ()
+        if self._attachments is None:
+            raise AttachmentUnavailable("附件功能没有开启")
+        return await self._attachments.for_turn(conversation, ids)
+
+    async def _checked(self, conversation: Conversation, turn: TurnInput,
+                       attachments: tuple[TurnAttachment, ...]) -> TurnInput:
+        """准备这一轮的第一段（不用会话锁）：模型选得对、附件放上、回答方式与 @ 核对过、扩展回答方式的指令算好。
+        额度在这之前判（_within_quota）。"""
+        if turn.model is not None and self._models is not None and not await self._models.choosable(turn.model):
+            raise UnknownModel(turn.model)
+        if attachments:
+            turn = turn.model_copy(update={"attachments": attachments})
+        turn = await self._fixed_mode(conversation, turn)
+        turn = await self._with_mentions(conversation, turn)
+        return await self._with_answer_mode(conversation, turn)
+
+    async def _packed(self, conversation: Conversation, turn: TurnInput, profile: RuntimeProfile | None) -> TurnInput:
+        """准备这一轮的第二段（在会话锁里、运行配置定了之后）：知识库目录、扩展补的上下文与扩展的状态。"""
+        turn = await self._with_catalog(conversation, turn, profile)
+        turn = await self._with_context(conversation, turn)
+        return await self._with_state(conversation, turn)
+
+    async def _deliver(self, conversation: Conversation, turn: TurnInput, profile: RuntimeProfile | None) -> str:
+        try:
+            return await self._kernel.send(conversation.id, turn)
+        except SessionNotFound:
+            return await self._resume_and_send(conversation, turn, profile)
+
+    async def activate(self, conversation: Conversation) -> None:
+        """宿主上的插件要在这段对话里自己发起一轮（定时任务到点）：确保宿主上开着它、事件泵开着——宿主随后投进来的
+        消息和回答照常记进对话。额度用完了这一次不激活（抛 QuotaExceeded），同用户自己发。"""
+        self._host(conversation)  # 设备上执行的对话在这里就拒绝
+        await self._within_quota(conversation, trigger="schedule")
+        await self._ensure_open(conversation)
+        await self._touch(conversation.id)
+        self._pump.ensure(conversation.id, conversation.workspace_id)
+
+    async def warm(self, conversation: Conversation) -> None:
+        """用户要发消息了（输入框里加了附件）：先把宿主上的对话和沙箱容器备好。两样空闲 30 分钟都会被回收，冷着发一条
+        要先重开对话、现建容器、把以前的附件重放进去，多等两三秒。两样同时做；尽力而为，失败只记日志，发送时照常会再开。
+        在设备上执行的对话没有可预热的。"""
+        if self._on_device(conversation):
+            return
+        results = await asyncio.gather(self._ensure_open(conversation),
+                                       *(warm(conversation) for warm in self._warmers), return_exceptions=True)
+        for result in results:
+            if isinstance(result, Exception):
+                log.warning("warming conversation %s failed: %s", conversation.id, type(result).__name__,
+                            exc_info=result)
+
+    async def _ensure_open(self, conversation: Conversation) -> None:
+        """宿主上开着这段对话：不在就按这个人此刻的配置恢复打开（新的策略与令牌），令牌续好。
+
+        开着时不跟着配置重开：可能正跑着一轮，重开会打断它；新配置等用户下次发问时生效，工具执行时的重判照样拦得住。
+        和发送共用会话锁：预热和发送撞上时，发送等预热把对话打开再发，不会两边各开一次。"""
+        async with self._lock(conversation.id):
+            profile = await self._profile(conversation, NO_SELECTION)
+            await self._resume_then(conversation, profile, _nothing)
+            await self._refresh_credentials(conversation)
+
+    async def _fixed_mode(self, conversation: Conversation, turn: TurnInput) -> TurnInput:
+        """扩展给这段对话定了回答方式（scopes.py）：每一轮都按它，输入框里选的不算。取不到范围抛 ScopeUnavailable，
+        这一轮不发。"""
+        scope = await self._scopes.of(conversation.workspace_id, conversation.id)
+        if scope is None or scope.answer_mode is None or scope.answer_mode == turn.answer_mode:
+            return turn
+        return turn.model_copy(update={"answer_mode": scope.answer_mode})
 
     async def _with_mentions(self, conversation: Conversation, turn: TurnInput) -> TurnInput:
         """扩展登记的 @（mention_kinds.py）：核对、交给扩展（例如问数把会话绑定到 @ 的数据源）。要在回答方式的指令算出来
@@ -283,6 +507,15 @@ class ConversationService:
             text=turn.text, answer_mode=turn.answer_mode))
         return turn if context is None else turn.model_copy(update={"context": context})
 
+    async def _with_state(self, conversation: Conversation, turn: TurnInput) -> TurnInput:
+        """带上扩展给宿主插件的状态（turn_state.py）。没有扩展登记时不带；插话（steer）不另算。"""
+        if not self._turn_state or turn.mode != "followup":
+            return turn
+        state = await self._turn_state.collect(TurnStateRequest(
+            workspace_id=conversation.workspace_id, user_id=conversation.user_id, conversation_id=conversation.id,
+            source=conversation.source, answer_mode=turn.answer_mode))
+        return turn if state is None else turn.model_copy(update={"extension_state": state})
+
     async def _refresh_credentials(self, conversation: Conversation) -> None:
         """每轮开始前把到期的令牌续上：电脑刚从睡眠醒来时，续期循环可能还没轮到，令牌却已按墙上时间过期。
         这里的失败只记日志，不挡这一轮（令牌没过期就照常能用）。"""
@@ -313,6 +546,18 @@ class ConversationService:
         page = rows[:limit]
         return ConversationPage(items=page, next=page[-1].updated_at if len(rows) > limit else None)
 
+    async def list_by_ids(self, *, workspace_id: str, user_id: str, ids: tuple[str, ...]) -> tuple[Conversation, ...]:
+        """本人的这几段对话，最近有动静的在前；别人的、后台的、不存在的不在里面。给侧栏按别的东西分组时一次取齐列表里还没翻到的
+        （例如本机工作区里的对话），不一条一条地取。"""
+        if not ids:
+            return ()
+        query = (select(Conversation)
+                 .where(Conversation.workspace_id == workspace_id, Conversation.user_id == user_id,
+                        Conversation.background.is_(False), Conversation.id.in_(ids))
+                 .order_by(Conversation.updated_at.desc(), Conversation.id.desc()))
+        async with self._sessionmaker() as session:
+            return tuple((await session.execute(query)).scalars().all())
+
     async def search(self, *, workspace_id: str, user_id: str, query: str) -> tuple[SearchHit, ...]:
         """搜本人的对话：标题与每轮问的话（search.py）。"""
         return await search_conversations(self._sessionmaker, workspace_id=workspace_id, user_id=user_id, query=query)
@@ -324,16 +569,19 @@ class ConversationService:
                               user_id=conversation.user_id)
 
     async def delete(self, conversation: Conversation) -> None:
-        """释放宿主会话、停泵、停止续期，再删事件、关联数据与会话本身。宿主上已不在也照删。"""
-        try:
-            await self._kernel.dispose(conversation.id)
-        except SessionNotFound:
-            pass
+        """释放宿主会话、停泵、停止续期，再删事件、关联数据与会话本身。宿主上已不在也照删；在设备上执行的对话宿主上本来就没有，
+        设备那边的本机会话由设备自己删。"""
+        if not self._on_device(conversation):
+            try:
+                await self._host(conversation).dispose(conversation.id)
+            except SessionNotFound:
+                pass
         await self._pump.stop(conversation.id)
         if self._tool_credentials is not None:
             self._tool_credentials.forget(conversation.id)
         for erase in self._erasers:
             await erase(conversation)
+        await self._scopes.release(conversation.workspace_id, conversation.id)  # 挂着的（例如专家）一起撤掉
         async with self._sessionmaker() as session:
             await session.execute(delete(RunEvent).where(RunEvent.conversation_id == conversation.id))
             await session.execute(delete(Conversation).where(Conversation.id == conversation.id))
@@ -414,39 +662,46 @@ class ConversationService:
             log.exception("host restart hook failed")
 
     def events(self, conversation: Conversation, cursor: Cursor) -> AsyncIterator[Outgoing]:
-        """打开事件流：确保泵在跑，再交出回放 + 实时的迭代器。"""
-        self._pump.ensure(conversation.id, conversation.workspace_id)
+        """打开事件流：确保泵在跑，再交出回放 + 实时的迭代器。在设备上执行的对话没有泵可拉，事件由设备送来时推过来。"""
+        if not self._on_device(conversation):
+            self._pump.ensure(conversation.id, conversation.workspace_id)
         return self._feed.iterate(conversation.id, cursor)
 
     async def cancel(self, conversation: Conversation) -> CancelResult:
-        return await self._kernel.cancel(conversation.id)
+        return await self._host(conversation).cancel(conversation.id)
 
     async def approvals(self, conversation: Conversation) -> list[PendingApproval]:
-        return await self._kernel.pending_approvals(conversation.id)
+        """待审批的操作。在设备上执行的对话由设备应答，这里没有（卡片照样从事件里画出来）。"""
+        if self._on_device(conversation):
+            return []
+        return await self._host(conversation).pending_approvals(conversation.id)
 
     async def decide(self, conversation: Conversation, approval_id: str, allow: bool, *,
                      remember: bool = False) -> None:
         """交回审批决定。remember 为真（批准并勾了「本会话内同类操作不再询问」）时先记授权，
         审批人就是对话所属用户（接口层已校验）；之后同一工具的审批由宿主应答者先查授权，不再弹卡片。"""
+        host = self._host(conversation)
         if remember and self._grants is not None:
-            pending = next((a for a in await self._kernel.pending_approvals(conversation.id) if a.id == approval_id),
-                           None)
+            pending = next((a for a in await host.pending_approvals(conversation.id) if a.id == approval_id), None)
             if pending is not None:
                 await self._grants.remember(conversation.workspace_id, conversation.id, conversation.user_id,
                                             pending.tool_name)
-        await self._kernel.decide_approval(conversation.id, approval_id, allow)
+        await host.decide_approval(conversation.id, approval_id, allow)
 
     async def questions(self, conversation: Conversation) -> list[PendingQuestion]:
-        return await self._kernel.pending_questions(conversation.id)
+        if self._on_device(conversation):
+            return []
+        return await self._host(conversation).pending_questions(conversation.id)
 
     async def answer(self, conversation: Conversation, question_id: str, answer: QuestionAnswer) -> None:
         """交回用户对一次提问的回答。与发送共用会话锁，宿主恢复会话时不会和发送撞上。"""
+        host = self._host(conversation)
         async with self._lock(conversation.id):
             try:
-                await self._kernel.answer_question(conversation.id, question_id, answer)
+                await host.answer_question(conversation.id, question_id, answer)
             except SessionNotFound:
                 profile = await self._profile(conversation, NO_SELECTION)
                 await self._resume_then(conversation, profile,
-                                        lambda: self._kernel.answer_question(conversation.id, question_id, answer))
+                                        lambda: host.answer_question(conversation.id, question_id, answer))
         await self._touch(conversation.id)
         self._pump.ensure(conversation.id, conversation.workspace_id)

@@ -1,9 +1,9 @@
 /**
- * 发给模型的运行时上下文（排在提问之后的那条消息）：去掉工作目录，写本轮的语言规则。
+ * 发给模型的运行时上下文（排在提问之后的那条消息）：写本轮的语言规则；服务端宿主上还去掉工作目录。
  *
- * 工作目录：官方工作目录服务每轮追加「Current working directory: <宿主机路径>」。宿主没有文件与命令工具，
- * 工作目录对模型无用，还泄露服务器路径；服务本身不能停用（技能目录、子 Agent 都依赖它），只能让这段变空，
- * 空的上下文渲染时被丢掉。
+ * 工作目录（只在配置了 hideWorkingDirectory 时）：官方工作目录服务每轮追加「Current working directory: <宿主机路径>」。
+ * 服务端宿主上那是宿主机的路径，对模型无用，还泄露服务器路径；服务本身不能停用（技能目录、子 Agent 都依赖它），只能让这段变空，
+ * 空的上下文渲染时被丢掉。用户设备上的本机宿主照官方留着：那就是用户选的工作文件夹。
  *
  * 语言：语言由业务服务判定并随消息下发，宿主不猜；规则只写在这一处，
  * 管的是给用户看的文字（调工具前的说明、提问、回答），不管模型思考——思考原文不展示给用户。
@@ -16,8 +16,9 @@
  * 2. 在 `system-prompt/assemble` 钩子里把工作目录服务补上的文本清空：它以 prepend 挂在最外层、在 next()
  *    之后写回文本；本插件晚于官方插件加载，同样 prepend 就排在更外层，拿到它写好的结果再清空。
  *
- * 对话界面能显示什么：系统提示里一段固定说明，挂在官方 WEB_SURFACE 的位置（官方用它说明网页界面）。
- * 不写进人设：人设可以被 KNOWWORK_PERSONA 整段替换，这段说明不该跟着丢。
+ * 对话界面能画 mermaid 示意图这件事不写进系统提示（2026-11-09 改）：原来这里常驻一段，问数的结果卡片已经有图，
+ * 模型又在正文里用 mermaid 的 xychart 画一遍。现在写在自带技能 diagram 里（plugins/dsh-host/skills/diagram），
+ * 要画示意图时才加载；问数、快速问答不放行技能工具，自然没有这个能力。
  */
 
 import { resolveRootSession } from './state.mjs'
@@ -27,35 +28,27 @@ export const inject = ['agents', 'systemPrompt']
 
 const SILENCED = 'working-directory:current'
 const LANGUAGE = 'knowwork:language'
-const WEB_SURFACE = 'knowwork:web-surface'
-
-// 前端把 mermaid 代码块画成图（web Markdown.tsx）；要图片文件的仍照常生成文件
-const WEB_SURFACE_PROMPT = '对话界面会把回答里的 ```mermaid 代码块直接画成图。用户要流程图、时序图、结构图、'
-  + '甘特图这类示意图时，直接在回答里写 mermaid 代码块，不用另外生成图片文件；节点文字里有括号、标点或空格时用双引号括起来。'
-  + '用户明确要图片文件，或要把图放进文档、幻灯片时，照常生成文件。'
 
 const LANGUAGE_RULES = {
-  zh: '语言要求：所有给用户看的文字都用简体中文，包括调用工具前的说明、重试的原因、向用户的提问和最终回答；'
-    + '用户明确要求其他语言时照办。工具参数、代码与文件名保持原样。',
-  en: 'Language: write all user-facing text in English, including notes before tool calls, retry explanations, '
-    + 'questions to the user and the final answer. Follow an explicit request for another language. '
-    + 'Tool arguments, code and file names stay as they are.',
+  // 思考也列上：页面边想边显示思考（2026-11-10 起），不写的话 Qwen 这类模型常用英文想
+  zh: '语言要求：所有给用户看的文字都用简体中文，包括思考过程（会显示给用户）、调用工具前的说明、重试的原因、'
+    + '向用户的提问和最终回答；用户明确要求其他语言时照办。工具参数、代码与文件名保持原样。',
+  en: 'Language: write all user-facing text in English, including your reasoning (it is shown to the user), '
+    + 'notes before tool calls, retry explanations, questions to the user and the final answer. '
+    + 'Follow an explicit request for another language. Tool arguments, code and file names stay as they are.',
 }
 
-/** @param {import('@deepseek-ai/cordis').Context} ctx */
-export function apply(ctx) {
-  ctx.systemPrompt.section({
-    name: WEB_SURFACE,
-    order: ctx.systemPrompt.getSectionOrder('WEB_SURFACE'),
-    interpolate: false,
-    text: WEB_SURFACE_PROMPT,
-  })
-
+/**
+ * @param {import('@deepseek-ai/cordis').Context} ctx
+ * @param {{ hideWorkingDirectory?: boolean }} [config]
+ */
+export function apply(ctx, config = {}) {
+  const hide = config?.hideWorkingDirectory === true
   ctx.on('agent/created', ({ agent }) => {
     const prompt = agent.ctx.systemPrompt
     if (prompt === undefined) return
     const order = prompt.getContextOrder('WORKING_DIRECTORY')
-    prompt.context({ name: SILENCED, order, required: true, interpolate: false, text: () => '' })
+    if (hide) prompt.context({ name: SILENCED, order, required: true, interpolate: false, text: () => '' })
     prompt.context({
       name: LANGUAGE,
       order,
@@ -65,6 +58,7 @@ export function apply(ctx) {
     })
   })
 
+  if (!hide) return
   ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
     const assembly = await next()
     return {

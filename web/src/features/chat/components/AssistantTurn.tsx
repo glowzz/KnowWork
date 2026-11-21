@@ -1,13 +1,12 @@
 /** 一轮助手回答：执行过程摘要、待办、审批与提问、正文（不套气泡）、文件、工具的说明（如已记住）、结束说明、操作图标。 */
-import { useState } from 'react';
 import type { QuestionAnswer } from '../../../api/conversations';
-import type { ApprovalView, ArtifactView, CitationSource, QuestionView, RunView } from '../events/types';
+import type { ApprovalView, CitationSource, QuestionView, RunView } from '../events/types';
 import { AnswerActions } from './AnswerActions';
 import { AnswerNotices } from './AnswerNotices';
 import { ApprovalCard } from './ApprovalCard';
 import { AnswerSources } from './AnswerSources';
 import { citedFiles, citedNumbers } from './citations';
-import { FileCards } from './FileCard';
+import { DeliverableCards } from './FileCard';
 import { Markdown } from './Markdown';
 import { ProcessSummary } from './ProcessSummary';
 import { QuestionCard } from './QuestionCard';
@@ -16,17 +15,17 @@ import { SearchConditions } from './SearchConditions';
 import { TodoList } from './TodoList';
 import { answerNotices } from '../events/notices';
 import { hasProcess, selectRunCards, selectRunSearch } from '../events/selectors';
-import { FilePreview, type PreviewFile } from '../../preview/FilePreview';
 import type { FeedbackInput, Rating } from '../../../api/feedback';
 
 interface Props {
   readonly run: RunView;
   readonly approvals: readonly ApprovalView[];
   readonly questions: readonly QuestionView[];
-  readonly artifacts: readonly ArtifactView[];
   /** 本会话引用目录；undefined 表示还没拉到。 */
   readonly sources?: Readonly<Record<number, CitationSource>>;
   readonly onDecide: (approvalId: string, allow: boolean, remember?: boolean) => Promise<void>;
+  /** 审批卡片上给不给「本会话内同类操作不再询问」 */
+  readonly rememberable?: boolean;
   /** 返回是否提交成功（失败已由页面提示）。 */
   readonly onAnswer: (questionId: string, answers: readonly QuestionAnswer[]) => Promise<boolean>;
   readonly onRegenerate?: () => void;
@@ -39,10 +38,14 @@ interface Props {
   readonly onFeedback?: (input: FeedbackInput) => Promise<boolean>;
   readonly onRetract?: () => Promise<boolean>;
   readonly busy: boolean;
+  /** 在这个对话里问一句（结果卡片上接着问的建议点了用）；还在跑、或不能发问时不给 */
+  readonly onAsk?: (text: string) => void;
   /** 正在逐字输出、还没成为正式消息的文字（events/live.ts），接在已有回答后面临时显示。 */
   readonly liveText?: string;
   /** 模型正在写的工具调用（还没开始跑）：执行过程那一行据此说正在做什么 */
   readonly liveTools?: readonly string[];
+  /** 正在输出的那一步到目前为止的思考（events/live.ts），在执行过程那一行下面边想边显示 */
+  readonly liveReasoning?: string;
 }
 
 /** 回答引用了、引用目录里却没有的编号；目录没拉到或回答没结束时不判断。 */
@@ -58,21 +61,22 @@ export function AssistantTurn({
   run,
   approvals,
   questions,
-  artifacts,
   sources,
   onDecide,
+  rememberable = true,
   onAnswer,
   onRegenerate,
   onDropConditions,
   onInspect,
   busy,
+  onAsk,
   liveText,
   liveTools,
+  liveReasoning,
   feedback,
   onFeedback,
   onRetract,
 }: Props) {
-  const [previewing, setPreviewing] = useState<PreviewFile | undefined>();
   // 和正式消息的拼法一致（onMessage 用空行分隔），正式消息到了整段替换时位置不跳
   const shown = liveText ? (run.answer ? `${run.answer}\n\n${liveText}` : liveText) : run.answer;
   const ended = run.endedAt !== undefined;
@@ -81,13 +85,21 @@ export function AssistantTurn({
   const search = selectRunSearch(run);
   return (
     <article className="kw-assistant" aria-label="助手回答">
-      {hasProcess(run) ? <ProcessSummary run={run} preparing={liveTools} /> : null}
+      {hasProcess(run) ? (
+        <ProcessSummary
+          run={run}
+          preparing={liveTools}
+          thinking={liveReasoning || undefined}
+          answering={Boolean(liveText)}
+        />
+      ) : null}
       {run.todos ? <TodoList todos={run.todos} running={!ended} /> : null}
       {approvals.map((approval) => (
         <ApprovalCard
           key={approval.id}
           approval={approval}
           step={run.steps.find((s) => s.callId === approval.callId)}
+          rememberable={rememberable}
           onDecide={(allow, remember) => onDecide(approval.id, allow, remember)}
         />
       ))}
@@ -116,12 +128,14 @@ export function AssistantTurn({
       ) : null}
       {/* 结果卡片等这一轮结束再出：模型先展示结果、后写结论，卡片早出的话，逐字输出的结论插在它上面、
           把它一路往下推（保持结论在上、卡片在下，内容只往下长）。过程里看步骤摘要 */}
-      {ended ? <ResultCards cards={selectRunCards(run)} question={run.asked[0]?.text} /> : null}
-      <FileCards
-        files={artifacts}
-        onPreview={(file) => (file.url ? setPreviewing({ name: file.name, url: file.url }) : undefined)}
-      />
-      <FilePreview file={previewing} onClose={() => setPreviewing(undefined)} />
+      {ended ? (
+        <ResultCards
+          cards={selectRunCards(run)}
+          question={run.asked[0]?.text}
+          onAsk={busy ? undefined : onAsk}
+        />
+      ) : null}
+      <DeliverableCards files={run.deliverables ?? []} />
       <AnswerNotices notices={answerNotices(run.steps)} />
       {notice ? <div className="kw-end-notice">{notice}</div> : null}
       {ended ? (

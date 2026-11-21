@@ -2,7 +2,13 @@
 
 from dataclasses import dataclass, field
 
-from knowwork_server.sandbox.contract import ExecResult, SandboxError, SandboxFile, SandboxTooLarge
+from knowwork_server.sandbox.contract import (
+    ExecResult,
+    SandboxFile,
+    SandboxFileError,
+    SandboxNotStarted,
+    SandboxTooLarge,
+)
 
 
 @dataclass
@@ -17,6 +23,10 @@ class FakeSandbox:
     reads: list[str] = field(default_factory=list)
     conversions: list[tuple[str, str]] = field(default_factory=list)  # (会话, 扩展名)
     fail_convert: Exception | None = None
+    extractions: list[tuple[str, str]] = field(default_factory=list)  # (会话, 扩展名)
+    extracted: bytes | None = None
+    fail_extract: Exception | None = None
+    recycled: set[tuple[str, str]] = field(default_factory=set)  # 空闲回收了的会话：工作区是空的，读不为它新建容器
 
     async def put_input(self, workspace_id, session_id, name, data):
         if name in self.fail_put:
@@ -27,20 +37,29 @@ class FakeSandbox:
         return SandboxFile(name=name, size=len(data))
 
     async def read_delivered(self, workspace_id, session_id, path, *, max_bytes):
-        """outputs 按 /workspace 下的相对路径存；path 是容器路径。"""
+        """outputs 按工作区路径存；path 是工作区路径（workpath.WorkPath）。"""
         if self.fail_list is not None:
             raise self.fail_list
-        name = path.removeprefix("/workspace/")
+        name = path.relative
         self.reads.append(name)
+        if (workspace_id, session_id) in self.recycled:
+            raise SandboxNotStarted("这个会话还没有沙箱")
         if name in self.fail_read:
             raise self.fail_read[name]
         try:
             data = self.outputs[(workspace_id, session_id)][name]
         except KeyError as error:
-            raise SandboxError("文件不存在") from error
+            raise SandboxFileError("文件不存在", "not_found") from error
         if len(data) > max_bytes:
             raise SandboxTooLarge("文件超过上限")
         return data
+
+    async def write_back(self, workspace_id, session_id, path, data):
+        """同 read_delivered：outputs 按工作区路径存；回收了的会话不写。"""
+        if (workspace_id, session_id) in self.recycled:
+            return False
+        self.outputs.setdefault((workspace_id, session_id), {})[path.relative] = bytes(data)
+        return True
 
     async def exec(self, workspace_id, session_id, command, *, timeout_seconds, max_output_bytes):
         return ExecResult(exit_code=0, stdout="", stderr="")
@@ -63,12 +82,25 @@ class FakeSandbox:
             raise self.fail_convert
         return data
 
+    async def extract_text(self, workspace_id, session_id, extension, data, *, max_bytes, timeout_seconds):
+        """默认提取出一段像样的正文；extracted 给了就用它（例如几乎没有字的扫描件），fail_extract 给了就抛。"""
+        self.extractions.append((session_id, extension))
+        if self.fail_extract is not None:
+            raise self.fail_extract
+        if self.extracted is not None:
+            return self.extracted
+        return f"# 从 {extension} 直接提取\n".encode() + "正文内容。".encode() * 20
+
     async def destroy(self, workspace_id, session_id):
         self.destroyed.append((workspace_id, session_id))
 
     def write_output(self, workspace_id, session_id, name, data: bytes) -> None:
-        """name 是 /workspace 下的相对路径。"""
+        """name 是工作区路径的写法（相对工作区根）。"""
         self.outputs.setdefault((workspace_id, session_id), {})[name] = data
+
+    def recycle(self, workspace_id, session_id) -> None:
+        """空闲回收：容器没了，工作区随之清空。"""
+        self.recycled.add((workspace_id, session_id))
 
     def delivered(self, workspace_id, session_id) -> list[str]:
         """这个会话写过的全部文件的宿主路径（扮演模型 present 了它们）。"""

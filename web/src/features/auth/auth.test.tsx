@@ -10,7 +10,8 @@ import SetupPage from './SetupPage';
 import { RequireAuth } from './RequireAuth';
 import { RequireAdmin } from './RequireAdmin';
 import { useSessionStore } from '../../stores/session';
-import { ME_KEY } from './queries';
+import { ME_KEY, rememberUser } from './queries';
+import { isExtensionEnabled, setEnabledExtensions } from '../../slots/registry';
 import type { LoginMethod } from '../../api/auth';
 import type { WorkspaceSummary } from '../../api/workspace';
 import { pickWorkspace, useWorkspaceStore } from '../../stores/workspace';
@@ -116,6 +117,22 @@ describe('LoginPage', () => {
     );
     // 账号密码类（域账号）的入口随域账号登录一起做，现在不显示成跳转链接
     expect(screen.queryByRole('link', { name: '使用域账号登录' })).not.toBeInTheDocument();
+  });
+
+  it('点单点登录前记下登录后要回的页面', async () => {
+    routeFetch({
+      ...initialized,
+      'GET /api/auth/methods': jsonResponse({ password: true, methods: [OIDC_METHOD] }),
+    });
+    renderWithApp(<LoginPage />, {
+      route: '/login',
+      path: '/login',
+      state: { from: '/oauth/authorize?client_id=kw-desktop' },
+    });
+    const link = await screen.findByRole('link', { name: '使用企业账号登录' });
+    link.addEventListener('click', (event) => event.preventDefault());
+    await userEvent.click(link);
+    expect(window.sessionStorage.getItem('kw-after-login')).toBe('/oauth/authorize?client_id=kw-desktop');
   });
 
   it('在企业微信里打开：直接走企业微信的免登', async () => {
@@ -337,6 +354,56 @@ describe('SetupPage', () => {
 });
 
 describe('RequireAuth 与 RequireAdmin', () => {
+  it('单点登录回来后回到登录前要去的页面（例如桌面端的登录确认页）', async () => {
+    window.sessionStorage.setItem('kw-after-login', '/oauth/authorize?client_id=kw-desktop');
+    routeFetch({
+      'GET /api/auth/me': jsonResponse({ ...ME, extensions: [] }),
+      'GET /api/workspaces': jsonResponse([DEFAULT_WS]),
+    });
+    renderWithApp(<RequireAuth>主界面</RequireAuth>, {
+      route: '/x',
+      path: '/x',
+      extraRoutes: { '/oauth/authorize': <div>确认页</div> },
+    });
+    expect(await screen.findByText('确认页')).toBeInTheDocument();
+    expect(window.sessionStorage.getItem('kw-after-login')).toBeNull();
+    setEnabledExtensions(undefined);
+  });
+
+  it('当前用户信息带着启用了的扩展：只显示这些扩展的入口', async () => {
+    routeFetch({
+      'GET /api/auth/me': jsonResponse({ ...ME, extensions: ['demo-on'] }),
+      'GET /api/workspaces': jsonResponse([DEFAULT_WS]),
+    });
+    renderWithApp(<RequireAuth>受保护</RequireAuth>, { route: '/x', path: '/x' });
+    expect(await screen.findByText('受保护')).toBeInTheDocument();
+    expect(isExtensionEnabled('demo-on')).toBe(true);
+    expect(isExtensionEnabled('demo-off')).toBe(false);
+    setEnabledExtensions(undefined);
+  });
+
+  it('登录后写进缓存的用户信息还没有扩展列表：重新取到之前不进主界面，免得菜单先多后少', async () => {
+    const client = testClient();
+    let release: () => void = () => undefined;
+    const fetched = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    routeFetch({
+      'GET /api/auth/me': async () => {
+        await fetched;
+        return jsonResponse({ ...ME, extensions: [] });
+      },
+      'GET /api/workspaces': jsonResponse([DEFAULT_WS]),
+    });
+    rememberUser(client, { id: ME.id, email: ME.email, name: ME.name });
+    renderWithApp(<RequireAuth>受保护</RequireAuth>, { route: '/x', path: '/x', client });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByText('受保护')).not.toBeInTheDocument();
+    release();
+    expect(await screen.findByText('受保护')).toBeInTheDocument();
+    setEnabledExtensions(undefined);
+  });
+
   it('未登录跳到登录页', async () => {
     routeFetch({ 'GET /api/auth/me': jsonResponse({ detail: '未登录' }, 401) });
     renderWithApp(<RequireAuth>受保护</RequireAuth>, {

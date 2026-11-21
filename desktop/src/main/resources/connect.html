@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'">
+<title>KnowWork 桌面端</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; display: grid; place-items: center; height: 100vh; margin: 0; }
+  main { width: 26rem; text-align: center; }
+  h1 { font-size: 1.4rem; }
+  p { color: gray; line-height: 1.6; }
+  input { width: 100%; padding: 0.55rem 0.75rem; font-size: 1rem; box-sizing: border-box; margin: 0.5rem 0 1rem; }
+  button { padding: 0.55rem 1.4rem; font-size: 1rem; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>KnowWork 桌面端</h1>
+  <section id="need-server">
+    <p>填服务地址，连接后用网页同一套账号登录。</p>
+    <input id="server" placeholder="https://knowwork.example.com" spellcheck="false">
+    <button id="go">连接</button>
+    <p id="error" class="hidden" style="color: crimson"></p>
+  </section>
+  <section id="logging-in" class="hidden">
+    <p>已打开浏览器等待授权……批准后自动回到这里；被拒绝或超时就再试一次。</p>
+    <button id="retry">重新打开浏览器</button>
+  </section>
+  <p id="server-line" class="hidden"></p>
+</main>
+<script>
+  const desktop = window.knowworkDesktop;
+  const sections = {
+    'need-server': document.getElementById('need-server'),
+    'logging-in': document.getElementById('logging-in'),
+  };
+  function show(state) {
+    for (const [key, node] of Object.entries(sections)) node.classList.toggle('hidden', key !== state);
+  }
+  async function startLogin() {
+    show('logging-in');
+    const result = await desktop.login();
+    if (!result.ok) {
+      document.getElementById('error').textContent = result.error?.message ?? result.message ?? '登录失败';
+      document.getElementById('error').classList.remove('hidden');
+      show('need-server');
+    }
+  }
+  document.getElementById('go').addEventListener('click', async () => {
+    const result = await desktop.connect(document.getElementById('server').value.trim());
+    if (!result.ok) {
+      document.getElementById('error').textContent = result.error?.message ?? result.message ?? '连接失败';
+      document.getElementById('error').classList.remove('hidden');
+      return;
+    }
+    await startLogin();
+  });
+  document.getElementById('retry').addEventListener('click', startLogin);
+  desktop.onState((state) => {
+    if (state.kind === 'need-server') {
+      show('need-server');
+      if (state.server) document.getElementById('server').value = state.server;
+    } else if (state.kind === 'logging-in') {
+      show('logging-in');
+    }
+  });
+  desktop.ready();
+</script>
+</body>
+</html>

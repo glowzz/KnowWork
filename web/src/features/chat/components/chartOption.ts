@@ -2,7 +2,8 @@
  * 结果表画成图：表格卡片里工具给的「怎么画」（TableChart）加上用户选的图形与数值列，拼成 ECharts 的配置。
  * 纯函数，不碰 DOM（颜色、字体由调用方从组件库的设计变量里取好传进来）。
  *
- * - 一次只画一列数值：几个指标量级常差很远（金额与单数），画在一根轴上小的那个就看不见了；上面切换看哪一列；
+ * - 几列数值按工具给的分组画（groups，问数按单位、量级分）：同一组的画在一张图里（营收和目标两条线），组之间在上面
+ *   切换；量级差很远的（金额与单数）不同组，画在一根轴上小的那个就看不见了。没给分组时一列一组；
  * - 柱子朝向照通行做法（2026-11-04 用户报「柱状图都是横的」，原来分类一律横着画）：时间（日期列，或年份、季度、
  *   月份这种写法）、按组分线、少而短的分类竖着画；分类多（超过 8 个）或名字长（竖着放标签得斜着排）的横着画，
  *   数写在柱子尾巴上、不画数值轴；
@@ -55,18 +56,32 @@ export const dataColors = (tokens: ChartTokens): string[] => [
 const columnIndex = (table: TableCard, name: string | undefined) =>
   name === undefined ? -1 : table.columns.findIndex((c) => c.name === name);
 
-/** 这张表能切成哪几种图：时间序列折线、面积、柱状；分类柱状、折线，单列非负、块数不多时还能画饼 */
+/** 几列数值的分组：同一组的画在一张图里，组之间切换；没分组、按组分线时一列一组 */
+export function measureGroups(chart: TableChart): string[][] {
+  if (chart.series || !chart.groups) return chart.y.map((name) => [name]);
+  return chart.groups.map((group) => [...group]);
+}
+
+/** 这一列所在的那一组；对不上（看板记着的旧列名）的是第一组。界面用组里第一列的列名认一组 */
+export function groupOf(chart: TableChart, name: string | undefined): string[] {
+  const groups = measureGroups(chart);
+  return groups.find((group) => name !== undefined && group.includes(name)) ?? groups[0] ?? [];
+}
+
+/** 这张表能切成哪几种图：时间序列折线、面积、柱状；分类柱状，单列非负、块数不多时还能画饼（一组几列的不画饼） */
 export function compatibleKinds(table: TableCard, chart: TableChart, measure: string): ChartKind[] {
   const x = columnIndex(table, chart.x);
   const xIsTime = table.columns[x]?.kind === 'date';
   if (chart.series || xIsTime || chart.type === 'line') return ['line', 'area', 'bar'];
+  if (groupOf(chart, measure).length > 1) return ['bar'];
   const y = columnIndex(table, measure);
   const values = table.rows.map((row) => numberOf(row[y] ?? null));
   const pieable =
     table.rows.length <= PIE_MAX &&
     values.every((v) => v !== null && v >= 0) &&
     values.some((v) => (v ?? 0) > 0);
-  return pieable ? ['bar', 'pie', 'line'] : ['bar', 'line'];
+  // 分类没有先后（区域、门店），连成折线看着像有趋势，不给
+  return pieable ? ['bar', 'pie'] : ['bar'];
 }
 
 /** 现在画哪种：用户选的这一列能画就画它，不能（换了一列、饼图画不了了）就画能画的第一种 */
@@ -101,9 +116,25 @@ export function isHorizontal(table: TableCard, chart: TableChart, kind: ChartKin
 }
 
 /** 图多高：横着的柱子按分类数算（每根 36px，三五根不必撑满一大块），其余固定 260 */
+/** 横向柱状一根一行（BAR_ROW 高），不封顶：封顶的话几十个分类挤成细线，数和名字叠在一起；超过 CHART_VIEW_MAX
+ * 的在卡片里滚动（ResultChart） */
+const BAR_ROW = 36;
+export const CHART_VIEW_MAX = 420;
+
 export function chartHeight(table: TableCard, chart: TableChart, kind: ChartKind): number {
   if (!isHorizontal(table, chart, kind)) return 260;
-  return Math.min(400, Math.max(120, table.rows.length * 36 + 24));
+  return Math.max(120, table.rows.length * BAR_ROW + 24);
+}
+
+/** 图上点的那一格（分类名）对应横轴那一列的原始取值；合并出来的、对不上的是 undefined */
+export function pickedValue(
+  table: TableCard,
+  chart: TableChart,
+  name: string,
+): { readonly value: CardCell } | undefined {
+  const x = columnIndex(table, chart.x);
+  const row = table.rows.find((r) => label(r[x] ?? null) === name);
+  return row && x >= 0 ? { value: row[x] ?? null } : undefined;
 }
 
 /** 工具给的类型落成默认的那一种 */
@@ -121,16 +152,21 @@ export function seriesNames(table: TableCard, chart: TableChart): string[] {
   return [...new Set(table.rows.map((row) => label(row[s] ?? null)))].slice(0, SERIES_MAX);
 }
 
-/** 取数：没有 series 是一条；有 series 按它的取值分成几条，横轴按出现的先后 */
+/** 取数：没有 series 时这一组的每列一条；有 series 按它的取值分成几条，横轴按出现的先后 */
 function build(table: TableCard, chart: TableChart, measure: string): Built {
   const x = columnIndex(table, chart.x);
   const y = columnIndex(table, measure);
   const s = columnIndex(table, chart.series);
-  const yLabel = table.columns[y]?.label ?? measure;
   if (s < 0)
     return {
       categories: table.rows.map((row) => label(row[x] ?? null)),
-      series: [{ name: yLabel, values: table.rows.map((row) => numberOf(row[y] ?? null)) }],
+      series: groupOf(chart, measure).map((name) => {
+        const i = columnIndex(table, name);
+        return {
+          name: table.columns[i]?.label ?? name,
+          values: table.rows.map((row) => numberOf(row[i] ?? null)),
+        };
+      }),
     };
   const categories = [...new Set(table.rows.map((row) => label(row[x] ?? null)))];
   const names = seriesNames(table, chart);
@@ -161,7 +197,28 @@ const baseStyle = (tokens: ChartTokens) => {
   };
 };
 
-/** 环形饼图：中间写合计与指标名，右边一列图例写每块的数与占比 */
+/**
+ * 饼图右边图例写全（名字、数、占比）要的宽度：环心在 29%、外圈 76%，图例从 58% 起写三栏，比这窄环的左边就出了画布、
+ * 图例的数和占比也被截掉（网页嵌入的小窗、手机上的卡片只有 300 来宽）。再窄换紧凑排法，用 ECharts 自带的
+ * media（按图的宽度套用，跟着容器宽度变）。
+ */
+const PIE_FULL_WIDTH = 510;
+
+/** 图例里的名字按显示宽度截短（汉字算一格，字母数字算半格多），超了留几格加省略号；悬停图例看全名 */
+function clip(name: string, cells: number): string {
+  const width = (ch: string) => ((ch.codePointAt(0) ?? 0) <= 0xff ? 0.6 : 1);
+  if ([...name].reduce((sum, ch) => sum + width(ch), 0) <= cells) return name;
+  let used = 0;
+  let kept = '';
+  for (const ch of name) {
+    if (used + width(ch) > cells - 1) break;
+    used += width(ch);
+    kept += ch;
+  }
+  return `${kept}…`;
+}
+
+/** 环形饼图：中间写合计与指标名，右边一列图例写每块的数与占比；卡片窄时环小一点、图例只写名字和占比 */
 function pieOption(built: Built, measureLabel: string, tokens: ChartTokens): Record<string, unknown> {
   const base = baseStyle(tokens);
   const values = built.series[0]?.values ?? [];
@@ -169,6 +226,15 @@ function pieOption(built: Built, measureLabel: string, tokens: ChartTokens): Rec
   const total = data.reduce((sum, d) => sum + d.value, 0);
   const byName = new Map(data.map((d) => [d.name, d.value]));
   const percent = (value: number) => (total > 0 ? `${Math.round((value / total) * 100)}%` : '—');
+  const narrow = {
+    title: { left: '28%', textStyle: { fontSize: 18 } },
+    legend: {
+      left: '56%',
+      formatter: (name: string) => `{name|${clip(name, 4)}}{pct|${percent(byName.get(name) ?? 0)}}`,
+      textStyle: { rich: { name: { width: 56 }, pct: { width: 36 } } },
+    },
+    series: [{ center: ['28%', '50%'], radius: ['36%', '54%'] }],
+  };
   return {
     ...base,
     tooltip: { ...base.tooltip, trigger: 'item' },
@@ -190,9 +256,10 @@ function pieOption(built: Built, measureLabel: string, tokens: ChartTokens): Rec
       itemWidth: 10,
       itemHeight: 10,
       itemGap: 10,
+      tooltip: { show: true },
       formatter: (name: string) => {
         const value = byName.get(name) ?? 0;
-        return `{name|${name}}{value|${full(value)}}{pct|${percent(value)}}`;
+        return `{name|${clip(name, 7)}}{value|${full(value)}}{pct|${percent(value)}}`;
       },
       textStyle: {
         ...base.textStyle,
@@ -214,6 +281,7 @@ function pieOption(built: Built, measureLabel: string, tokens: ChartTokens): Rec
         data,
       },
     ],
+    media: [{ query: { maxWidth: PIE_FULL_WIDTH - 1 }, option: narrow }],
   };
 }
 
@@ -251,6 +319,7 @@ export function chartOption(
   const { categories, series } = built;
   const base = baseStyle(tokens);
   const horizontal = isHorizontal(table, chart, kind);
+  const negative = series.some((s) => s.values.some((v) => v !== null && v < 0));
   const category = {
     type: 'category',
     data: categories,
@@ -270,13 +339,23 @@ export function chartOption(
   return {
     ...base,
     tooltip: { ...base.tooltip, trigger: 'axis', axisPointer: { type: kind === 'bar' ? 'shadow' : 'line' } },
-    grid: { left: 4, right: horizontal ? 56 : 16, top: 12, bottom: 4, containLabel: true },
+    grid: {
+      left: horizontal && negative ? 60 : 4,
+      right: horizontal ? 56 : 16,
+      top: 12,
+      bottom: 4,
+      containLabel: true,
+    },
     xAxis: horizontal ? value : category,
     yAxis: horizontal ? category : value,
     series: series.map((s) => ({
       name: s.name,
       type: kind === 'area' ? 'line' : kind,
-      data: s.values,
+      // 横着画时负的那根往左长，数写在它左边那头（写右边就压在零线上、挨着别的柱子）
+      data:
+        kind === 'bar' && horizontal
+          ? s.values.map((v) => (v !== null && v < 0 ? { value: v, label: { position: 'left' } } : v))
+          : s.values,
       ...(kind === 'bar'
         ? barStyle(horizontal, tokens)
         : {

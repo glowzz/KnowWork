@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '../test/user';
 import { jsonResponse, ME, renderWithApp, routeFetch } from '../test/render';
 import { AdminLayout } from './AdminLayout';
@@ -13,20 +13,22 @@ afterEach(() => {
   vi.unstubAllGlobals();
   window.localStorage.clear();
   useReplyLanguage.setState({ language: 'zh' });
-  useSidebar.setState({ collapsed: false });
+  useSidebar.setState({ collapsed: false, folded: false });
 });
 
 const page1 = {
   items: [
-    { id: 'c1', title: '季度总结', createdAt: null, updatedAt: null },
-    { id: 'c2', title: '', createdAt: null, updatedAt: null },
+    { id: 'c1', title: '季度总结', source: '', createdAt: null, updatedAt: null },
+    { id: 'c2', title: '', source: '', createdAt: null, updatedAt: null },
   ],
   next: '2026-10-18T00:00:00+00:00',
 };
 const page2 = {
   items: [
-    { id: 'c2', title: '', createdAt: null, updatedAt: null },
-    { id: 'c3', title: '旧会话', createdAt: null, updatedAt: null },
+    { id: 'c2', title: '', source: '', createdAt: null, updatedAt: null },
+    { id: 'c3', title: '旧会话', source: '', createdAt: null, updatedAt: null },
+    // 企业微信机器人私聊来的（认人，会话记在本人名下）：标题后面标平台
+    { id: 'c4', title: '我的报销额度', source: 'wecom', createdAt: null, updatedAt: null },
   ],
   next: null,
 };
@@ -65,6 +67,19 @@ describe('AppLayout 与侧栏', () => {
     await waitFor(() => expect(nav).not.toHaveClass('is-collapsed'));
   });
 
+  it('文档并排打开时侧栏暂时收起：不改用户的选择；这时点展开只取消暂时收起', async () => {
+    renderWithApp(<AppLayout />, { route: '/chat', path: '*' });
+    const nav = await screen.findByRole('navigation', { name: '主导航' });
+    expect(nav).not.toHaveClass('is-collapsed');
+    act(() => useSidebar.getState().fold(true));
+    expect(nav).toHaveClass('is-collapsed');
+    expect(window.localStorage.getItem('kw.sidebarCollapsed')).not.toBe('1');
+    await userEvent.click(screen.getByRole('button', { name: '展开侧栏' }));
+    expect(nav).not.toHaveClass('is-collapsed');
+    expect(useSidebar.getState()).toMatchObject({ collapsed: false, folded: false });
+    act(() => useSidebar.getState().fold(false));
+  });
+
   it('显示新对话、分页的最近会话与用户；管理入口不在侧栏，在用户菜单里', async () => {
     api(true);
     renderWithApp(<AppLayout />, {
@@ -77,6 +92,8 @@ describe('AppLayout 与侧栏', () => {
     expect(screen.getByRole('link', { name: /未命名对话/ })).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: '加载更多' }));
     expect(await screen.findByRole('link', { name: /旧会话/ })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /我的报销额度/ })).toHaveTextContent('企业微信');
+    expect(screen.getByRole('link', { name: /旧会话/ })).not.toHaveTextContent('企业微信');
     expect(screen.getAllByRole('link', { name: /未命名对话/ })).toHaveLength(1);
     expect(screen.queryByRole('button', { name: '加载更多' })).not.toBeInTheDocument();
     expect(await screen.findByText('李雷')).toBeInTheDocument();
@@ -215,7 +232,7 @@ describe('AppLayout 与侧栏', () => {
 
   it('flattenPages 去重并容忍空值', () => {
     expect(flattenPages(undefined)).toEqual([]);
-    expect(flattenPages([page1, page2]).map((c) => c.id)).toEqual(['c1', 'c2', 'c3']);
+    expect(flattenPages([page1, page2]).map((c) => c.id)).toEqual(['c1', 'c2', 'c3', 'c4']);
   });
 });
 

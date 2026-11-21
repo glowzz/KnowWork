@@ -29,8 +29,14 @@ export function endReasonOf(event: V1Event): EndReason {
       return { kind: 'failed', message: FAILED_MESSAGES[code] ?? '这一轮没有完成，请稍后重试' };
     }
     default:
+      // 宿主下一轮会告诉模型截在哪、要拆小（runtime-host output-limit.mjs），所以「继续」管用；
+      // 上限是管理员给模型填的「最大输出」（模型网关按它收紧），调高也行
       return event.data.reason === 'max_tokens'
-        ? { kind: 'max-tokens', message: '回答过长，已被截断' }
+        ? {
+            kind: 'max-tokens',
+            message:
+              '这一步要输出的内容超过了模型单次输出的上限，没写完就停了。回复「继续」，AI 会拆小接着做；也可以请管理员调高这个模型的「最大输出」。',
+          }
         : { kind: 'completed' };
   }
 }
@@ -299,6 +305,18 @@ export function onMessage(state: ChatState, event: V1Event, runId: string): Chat
       ? onAsked(state, event, runId, value, attachments, mentions)
       : state;
   }
+  if (role === 'trigger') {
+    const trigger = {
+      id: event.itemId ?? `trigger-${runId}`,
+      source: str(event.data.source) ?? 'unknown',
+      text: value,
+      time: event.time,
+    };
+    // 只认一轮的第一条：Agent 正忙时官方把后台任务、子 Agent 做完的通知塞进当前这一轮，那一轮不是它发起的
+    return updateRun(withRun(state, runId, event.time), runId, (r) =>
+      r.trigger !== undefined || r.asked.length > 0 ? r : { ...r, trigger },
+    );
+  }
   if (!value) return state;
   if (role !== undefined && role !== 'assistant') return state;
   return updateRun(withRun(state, runId, event.time), runId, (r) => ({
@@ -369,7 +387,10 @@ export function onApprovalResolved(state: ChatState, event: V1Event, approvalId:
   const target = state.approvals.find((a) => a.id === approvalId);
   if (!target || target.status !== 'pending') return state;
   const status = approvalStatus(str(event.data.outcome));
-  const approvals = state.approvals.map((a) => (a.id === approvalId ? { ...a, status } : a));
+  const auto = event.data.auto === true;
+  const approvals = state.approvals.map((a) =>
+    a.id === approvalId ? { ...a, status, ...(auto ? { auto } : {}) } : a,
+  );
   const withStatus: ChatState = target.runId
     ? updateRun({ ...state, approvals }, target.runId, (r) =>
         r.status === 'waiting' ? { ...r, status: 'running' } : r,

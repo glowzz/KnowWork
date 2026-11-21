@@ -1,0 +1,10 @@
+# 开发/测试用：桌面端扩展镜像覆盖（临时，不上库）
+services:
+  api:
+    image: knowwork-server:desktop
+  worker:
+    image: knowwork-server:desktop
+  model-gateway:
+    image: knowwork-server:desktop
+  gateway:
+    image: knowwork-gateway:desktop

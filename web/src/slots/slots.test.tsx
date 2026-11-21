@@ -1,16 +1,53 @@
-import { describe, expect, it } from 'vitest';
-import { screen } from '@testing-library/react';
+import { useEffect, useState } from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { fireEvent, screen } from '@testing-library/react';
 import { BookOpen } from '@openai/apps-sdk-ui/components/Icon';
 import { buildRoutes } from '../app/router';
 import { Composer } from '../features/chat/components/Composer';
 import ModelsPage from '../features/admin/models/ModelsPage';
+import UsagePage from '../features/admin/UsagePage';
 import SettingsPage from '../features/settings/SettingsPage';
 import { adminNav, ADMIN_NAV, SYSTEM_NAV, systemNav } from '../layout/nav';
 import { Sidebar } from '../layout/Sidebar';
 import { jsonResponse, ME, renderWithApp, routeFetch } from '../test/render';
-import { register, slotItems } from './registry';
+import userEvent from '../test/user';
+import { isExtensionEnabled, register, setEnabledExtensions, slotItems } from './registry';
 
 describe('前端插槽', () => {
+  afterEach(() => setEnabledExtensions(undefined));
+
+  it('条目标了所属扩展：扩展没启用时不显示（装了、没授权的不留一个点开就加载失败的菜单）', () => {
+    // 用这个文件里别的测试不看的插槽，免得留下的条目串到别的测试里
+    register('insights.base.action', { sourceId: 'x', label: '开着的扩展', to: () => '/x-on' }, 'demo-on');
+    register(
+      'insights.base.action',
+      { sourceId: 'x', label: '没授权的扩展', to: () => '/x-off' },
+      'demo-off',
+    );
+    const labels = () => slotItems('insights.base.action').map((item) => item.label);
+    expect(labels()).toEqual(expect.arrayContaining(['开着的扩展', '没授权的扩展']));
+    setEnabledExtensions(['demo-on']);
+    expect(labels()).toContain('开着的扩展');
+    expect(labels()).not.toContain('没授权的扩展');
+    expect(slotItems('insights.base.action')).toBe(slotItems('insights.base.action'));
+    expect(isExtensionEnabled('demo-off')).toBe(false);
+    setEnabledExtensions(undefined);
+    expect(labels()).toContain('没授权的扩展');
+  });
+
+  it('没启用的扩展的页面：路由照样挂着，打开时跳回首页', async () => {
+    register('app.routes', { path: 'x-off-page', element: <p>没授权的页面</p> }, 'demo-off');
+    const route = slotItems('app.routes').find((r) => r.path === 'x-off-page')!;
+    setEnabledExtensions([]);
+    renderWithApp(<>{route.element}</>, {
+      route: '/x-off-page',
+      path: '/x-off-page',
+      extraRoutes: { '/': <p>首页</p> },
+    });
+    expect(await screen.findByText('首页')).toBeInTheDocument();
+    expect(screen.queryByText('没授权的页面')).not.toBeInTheDocument();
+  });
+
   it('开源构建时插槽都是空的，菜单与路由和内置的一样', () => {
     expect(slotItems('admin.nav')).toEqual([]);
     expect(adminNav().map((group) => group.items.length)).toEqual(
@@ -92,6 +129,32 @@ describe('前端插槽', () => {
     expect(links.slice(0, 3)).toEqual(['新对话', '技能', '知识库']);
   });
 
+  it('侧栏入口下面可以挂子项，收起时子项拿得到 collapsed；只在正好是这个地址时选中的入口，到子项的页面不跟着亮', async () => {
+    routeFetch({
+      'GET /api/auth/me': jsonResponse(ME),
+      'GET /api/workspaces/default/conversations': jsonResponse({ items: [], next: null }),
+      'GET /api/brand': jsonResponse({ name: 'KnowWork', logo_url: null }),
+    });
+    register('app.nav', {
+      to: '/experts',
+      end: true,
+      label: '专家',
+      icon: <BookOpen />,
+      Sub: ({ collapsed }) =>
+        collapsed ? null : (
+          <a href="/experts/ex_1" className="kw-sidebar-link">
+            经营分析
+          </a>
+        ),
+    });
+    renderWithApp(<Sidebar />, { route: '/experts/ex_1' });
+    const nav = await screen.findByRole('navigation', { name: '主导航' });
+    const links = Array.from(nav.querySelectorAll('a')).map((link) => link.textContent);
+    // 注册表跨用例保留（上一条注册的知识库还在），只看子项紧跟在它的入口后面
+    expect(links.slice(links.indexOf('专家'), links.indexOf('专家') + 2)).toEqual(['专家', '经营分析']);
+    expect(screen.getByRole('link', { name: '专家' })).not.toHaveClass('is-active');
+  });
+
   it('输入框左上角回答方式后面放扩展的一小段，拿得到会话 id 与回答方式；固定了回答方式的输入框不放', () => {
     routeFetch({
       'GET /api/workspaces/default/conversations/mention-options': jsonResponse({
@@ -113,5 +176,73 @@ describe('前端插槽', () => {
     unmount();
     renderWithApp(<Composer running={false} onSend={send} answerMode="analytics_model" />);
     expect(screen.queryByText(/范围条/)).toBeNull();
+  });
+
+  it('输入框上的扩展可以让它暂时发不出去：发送按钮不可点、回车只提示原因，字留着；放开了又能发', async () => {
+    routeFetch({
+      'GET /api/workspaces/default/conversations/mention-options': jsonResponse({
+        bases: [],
+        services: [],
+        skills: [],
+      }),
+    });
+    const gate = { reason: null as string | null };
+    register('chat.composer.top', {
+      Component: ({ conversationId, block, running }) => {
+        useEffect(() => {
+          if (conversationId === 'c-quota') block(gate.reason);
+        }, [conversationId, block, running]);
+        return null;
+      },
+    });
+    const send = vi.fn(async () => undefined);
+    function Harness() {
+      const [running, setRunning] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setRunning((was) => !was)}>
+            一轮开始
+          </button>
+          <Composer running={running} onSend={send} conversationId="c-quota" />
+        </>
+      );
+    }
+    gate.reason = '本月额度已用完，12 月 1 日恢复';
+    renderWithApp(<Harness />);
+    const box = screen.getByRole('textbox');
+    await userEvent.type(box, '汇总一下差旅费用');
+    expect(screen.getByRole('button', { name: '发送' })).toBeDisabled();
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(send).not.toHaveBeenCalled();
+    expect(box).toHaveValue('汇总一下差旅费用');
+    gate.reason = null;
+    await userEvent.click(screen.getByRole('button', { name: '一轮开始' }));
+    expect(screen.getByRole('button', { name: '发送' })).toBeEnabled();
+  });
+
+  it('管理后台「用量」：扩展加了标签页才出标签栏，「统计」在最前；网址里的 tab 打开那一页', async () => {
+    routeFetch({
+      'GET /api/workspaces/default/usage': jsonResponse([]),
+      'GET /api/workspaces/default/members': jsonResponse([]),
+    });
+    const { unmount } = renderWithApp(<UsagePage />);
+    expect(await screen.findByRole('heading', { name: '用量' })).toBeInTheDocument();
+    expect(screen.queryByRole('tab')).toBeNull();
+    unmount();
+    register('admin.usage.tabs', { key: 'quota', label: '额度', children: <p>本月额度概况</p> });
+    renderWithApp(<UsagePage />, { route: '/admin/usage?tab=quota' });
+    const tabs = await screen.findAllByRole('tab');
+    expect(tabs.map((tab) => tab.textContent)).toEqual(['统计', '额度']);
+    expect(screen.getByText('本月额度概况')).toBeInTheDocument();
+  });
+
+  it('个人设置「我的用量」最上面放扩展的一块，下面照旧是用量明细', async () => {
+    routeFetch({
+      'GET /api/workspaces/default/usage/me': jsonResponse([]),
+      'GET /api/me/api-keys': jsonResponse([]),
+    });
+    register('settings.usage.top', { children: <p>本月额度还剩 1.4 万</p> });
+    renderWithApp(<SettingsPage />, { route: '/settings?tab=usage' });
+    expect(await screen.findByText('本月额度还剩 1.4 万')).toBeInTheDocument();
   });
 });

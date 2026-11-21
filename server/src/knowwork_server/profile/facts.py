@@ -22,7 +22,7 @@ from ..tools.registry import ToolContext, ToolSpec
 from .clearance import ToolClearance
 from .compiler import KnowledgeEntry, ProfileFacts, compile_profile
 from .errors import ProfileUnavailable
-from .snapshot import NO_SELECTION, RuntimeProfile, TurnSelection
+from .snapshot import NO_SELECTION, ProfileNarrowing, RuntimeProfile, TurnSelection
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +30,8 @@ RoleOf = Callable[[str, str], Awaitable[str | None]]
 AllTools = Callable[[ToolContext], Awaitable[list[ToolSpec]]]
 # (user_id, workspace_id) → 这个用户可用的知识源
 KnowledgeOf = Callable[[str, str], Awaitable[tuple[KnowledgeEntry, ...]]]
+# (workspace_id, session_id) → 扩展给这段对话的范围收窄（conversations/scopes.py）；None 不收窄
+NarrowingOf = Callable[[str, str], Awaitable[ProfileNarrowing | None]]
 
 
 class SkillSource(Protocol):
@@ -37,12 +39,12 @@ class SkillSource(Protocol):
 
 
 class ModelSource(Protocol):
-    async def default_capabilities(self, workspace_id: str) -> frozenset[str] | None: ...
+    async def capabilities_of(self, workspace_id: str, alias: str | None) -> frozenset[str] | None: ...
 
 
 # 要模型能看图才有用的宿主官方工具。官方 dsh-tool-fs 的 read_image 对所有会话可见、执行时才因模型不收图而失败，
 # 模型会先转图片再去调它，白做几步（官方的做法是由组合方用作用域收窄收掉，见 dsh-tool-fs README）。
-# 默认模型没勾「看图」（或查不到默认模型）时进 denied_tools，宿主经官方 tools.restrict 收掉。
+# 这一轮用的模型没勾「看图」（或查不到）时进 denied_tools，宿主经官方 tools.restrict 收掉。
 VISION_TOOLS: tuple[str, ...] = ("read_image",)
 
 
@@ -62,6 +64,7 @@ class ProfileSources:
     role_of: RoleOf
     # 宿主里的官方工具（不经工具桥）中这一部署一律收掉的，例如没开沙箱时的 bash、文件工具与 present
     host_denied: tuple[str, ...] = ()
+    narrowing_of: NarrowingOf | None = None
 
 
 class ProfileCompiler:
@@ -87,14 +90,16 @@ class ProfileCompiler:
         if not clearance.member(user_id, workspace_id):
             return ProfileFacts(workspace_id=workspace_id, user_id=user_id, role=None, member=False, tools=specs,
                                 selection=selection, host_denied=self._s.host_denied)
-        capabilities = await self._s.models.default_capabilities(workspace_id) or frozenset()
+        # 这一轮用的模型（输入框选的，没选按 default）能不能看图
+        capabilities = await self._s.models.capabilities_of(workspace_id, selection.model) or frozenset()
         host_denied = self._s.host_denied if "vision" in capabilities else (*self._s.host_denied, *VISION_TOOLS)
         return ProfileFacts(
             workspace_id=workspace_id, user_id=user_id, role=await self._s.role_of(user_id, workspace_id),
             member=True, tools=specs, permitted_tools=clearance.permitted(user_id, workspace_id, [s.name for s in specs]),
             builtin_tools=clearance.builtin_names(), skills=tuple(await self._s.skills.for_session(workspace_id, user_id)),
             knowledge=await self._s.knowledge(user_id, workspace_id), selection=selection,
-            host_denied=host_denied)
+            host_denied=host_denied,
+            narrowing=await self._s.narrowing_of(workspace_id, session_id) if self._s.narrowing_of else None)
 
 
 def knowledge_from_admin(admin: SourceLister) -> KnowledgeOf:

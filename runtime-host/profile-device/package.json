@@ -1,0 +1,14 @@
+{
+  "name": "dsh-profile-knowwork-device-host",
+  "private": true,
+  "dependencies": {},
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@knowwork/dsh-host",
+        "@knowwork/desktop-host-bundle"
+      ]
+    }
+  }
+}

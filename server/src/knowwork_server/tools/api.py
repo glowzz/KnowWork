@@ -8,6 +8,9 @@
 
 两者都要 `Authorization: Bearer <受众 tools 的短期令牌>`。错误统一为 `{"error": {"code", "message"}}`，
 message 可以直接给模型看，不含内部细节。
+
+登记了原生应用（桌面端）时，同一套接口在公开端口的 `/api/extensions/tools` 下再挂一份，给用户电脑上的本机宿主回调：
+令牌是同一种，经令牌交换拿到（identity/oauth_exchange.py），没有令牌的请求一律 401。
 """
 
 from collections.abc import Awaitable, Callable
@@ -17,9 +20,11 @@ from fastapi import APIRouter, Header, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from ..kernel.contract import ANSWER_MODE_PATTERN
 from .service import ExecuteRequest, ToolAccessError, ToolService
 
 PREFIX = "/internal/extensions/tools"
+PUBLIC_PREFIX = "/api/extensions/tools"
 # (workspace_id, conversation_id, user_id, tool_name) → 是否有会话授权（approvals.SessionGrants.covers）
 GrantCheck = Callable[[str, str, str, str], Awaitable[bool]]
 
@@ -37,6 +42,8 @@ class _ExecuteBody(BaseModel):
     arguments: dict[str, Any] = Field(default_factory=dict)
     agent_session_id: str = Field(alias="agentSessionId", pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
     call_id: str = Field(alias="callId", min_length=1, max_length=200)
+    # 这一步的回答方式；老的宿主不带，按智能体算
+    answer_mode: str = Field(default="agent", alias="answerMode", pattern=ANSWER_MODE_PATTERN)
 
 
 def _error(status: int, code: str, message: str) -> JSONResponse:
@@ -49,10 +56,11 @@ def _bearer(authorization: str | None) -> str:
     return authorization[7:]
 
 
-def build_internal_router(service: ToolService, grants: GrantCheck | None = None) -> APIRouter:
-    router = APIRouter()
+def build_internal_router(service: ToolService, grants: GrantCheck | None = None, *,
+                          path_prefix: str = PREFIX) -> APIRouter:
+    router = APIRouter(include_in_schema=False)
 
-    @router.post(f"{PREFIX}/approval-grant")
+    @router.post(f"{path_prefix}/approval-grant")
     async def approval_grant(request: Request, authorization: str | None = Header(default=None)):
         try:
             claims = service.verify(_bearer(authorization))
@@ -66,7 +74,7 @@ def build_internal_router(service: ToolService, grants: GrantCheck | None = None
                                                       body.tool_name)
         return {"granted": granted}
 
-    @router.get(f"{PREFIX}/list")
+    @router.get(f"{path_prefix}/list")
     async def list_tools(authorization: str | None = Header(default=None)):
         try:
             claims = service.verify(_bearer(authorization))
@@ -76,7 +84,7 @@ def build_internal_router(service: ToolService, grants: GrantCheck | None = None
         notes = await service.notes(claims)
         return {"tools": [spec.describe() for spec in specs], **({"notes": notes} if notes else {})}
 
-    @router.post(f"{PREFIX}/execute")
+    @router.post(f"{path_prefix}/execute")
     async def execute(request: Request, authorization: str | None = Header(default=None),
                       idempotency_key: str | None = Header(default=None)):
         try:
@@ -86,7 +94,7 @@ def build_internal_router(service: ToolService, grants: GrantCheck | None = None
                 raise ToolAccessError(400, "invalid_request", "Idempotency-Key 必须是「会话 ID:调用 ID」")
             result = await service.execute(claims, ExecuteRequest(
                 tool_name=body.tool_name, arguments=body.arguments, agent_session_id=body.agent_session_id,
-                call_key=idempotency_key))
+                call_key=idempotency_key, answer_mode=body.answer_mode))
         except ToolAccessError as error:
             return _error(error.status, error.code, str(error))
         return {"actionId": result.action_id, "status": result.status, "content": result.content,

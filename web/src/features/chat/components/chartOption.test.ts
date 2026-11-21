@@ -7,6 +7,8 @@ import {
   compact,
   compatibleKinds,
   dataColors,
+  groupOf,
+  measureGroups,
   seriesNames,
   type ChartTokens,
 } from './chartOption';
@@ -104,6 +106,45 @@ describe('结果表画成图的配置', () => {
     expect(orders.series[0]?.areaStyle).toBeDefined();
   });
 
+  it('同一组的几列数值画在一张图里（几条线、几组柱子），组用第一列的列名认；分类不画饼；没分组时一列一组', () => {
+    const plan: TableCard = {
+      ...trend,
+      columns: [...trend.columns, { name: 'target', label: '目标', kind: 'number' }],
+      rows: [
+        ['2026-01', 120000, 30, 130000],
+        ['2026-02', 98000, 25, 100000],
+      ],
+      chart: {
+        type: 'line',
+        x: 'month',
+        y: ['revenue', 'orders', 'target'],
+        groups: [['revenue', 'target'], ['orders']],
+      },
+    };
+    expect(measureGroups(plan.chart!)).toEqual([['revenue', 'target'], ['orders']]);
+    expect(measureGroups(trend.chart!)).toEqual([['revenue'], ['orders']]);
+    expect(groupOf(plan.chart!, 'target')).toEqual(['revenue', 'target']);
+    expect(groupOf(plan.chart!, 'nope')).toEqual(['revenue', 'target']);
+    const option = shape(
+      chartOption(plan, plan.chart!, { kind: 'line', measure: 'revenue', tokens: TOKENS }),
+    );
+    expect(option.series.map((s) => [s.name, s.data])).toEqual([
+      ['销售额', [120000, 98000]],
+      ['目标', [130000, 100000]],
+    ]);
+    const single = shape(chartOption(plan, plan.chart!, { kind: 'line', measure: 'orders', tokens: TOKENS }));
+    expect(single.series.map((s) => s.name)).toEqual(['订单数']);
+    const byRegion: TableCard = {
+      ...regions,
+      columns: [...regions.columns, { name: 'target', label: '目标', kind: 'number' }],
+      rows: [
+        ['华东', 300, 280],
+        ['华南', 200, 210],
+      ],
+      chart: { type: 'bar', x: 'region', y: ['revenue', 'target'], groups: [['revenue', 'target']] },
+    };
+    expect(compatibleKinds(byRegion, byRegion.chart!, 'revenue')).toEqual(['bar']);
+  });
   it('柱子朝向照通行做法：少而短的分类、年份这类竖着画；分类多或名字长的横着画（分类在纵轴、从上往下按原顺序）', () => {
     const few = shape(
       chartOption(regions, regions.chart!, { kind: 'bar', measure: 'revenue', tokens: TOKENS }),
@@ -142,6 +183,18 @@ describe('结果表画成图的配置', () => {
     const formatter = bar.series[0]?.label?.formatter as (p: { value: unknown }) => string;
     expect(formatter({ value: 1_286_000 })).toBe('128.6万');
     expect(chartHeight(ranking, regions.chart!, 'bar')).toBe(384);
+    // 一根柱子一行、不封顶：几十个分类也一行一个，挤成细线时数和名字会叠在一起（界面上超过一屏在卡片里滚动）
+    const many: TableCard = { ...ranking, rows: Array.from({ length: 30 }, (_, i) => [`门店${i}`, 30 - i]) };
+    expect(chartHeight(many, regions.chart!, 'bar')).toBe(30 * 36 + 24);
+    // 有负数（变化、利润）：负的那根数写在它左边那头，不压在零线上
+    const change: TableCard = { ...ranking, rows: [...ranking.rows, ['华北', -3]] };
+    const diverging = shape(
+      chartOption(change, regions.chart!, { kind: 'bar', measure: 'revenue', tokens: TOKENS }),
+    );
+    expect(diverging.series[0]?.data).toEqual([
+      ...ranking.rows.map((row) => row[1]),
+      { value: -3, label: { position: 'left' } },
+    ]);
     const long: TableCard = {
       ...regions,
       rows: [
@@ -214,11 +267,11 @@ describe('结果表画成图的配置', () => {
     ]);
   });
 
-  it('能切的图：时间序列折线、面积、柱状；分类单列不为负、块数不多还能画饼，饼图带百分比', () => {
+  it('能切的图：时间序列折线、面积、柱状；分类只画柱状，单列不为负、块数不多还能画饼（分类没有先后，不连成线），饼图带百分比', () => {
     expect(compatibleKinds(trend, trend.chart!, 'revenue')).toEqual(['line', 'area', 'bar']);
-    expect(compatibleKinds(regions, regions.chart!, 'revenue')).toEqual(['bar', 'pie', 'line']);
+    expect(compatibleKinds(regions, regions.chart!, 'revenue')).toEqual(['bar', 'pie']);
     const negative = { ...regions, rows: [...regions.rows, ['西北', -5]] } as TableCard;
-    expect(compatibleKinds(negative, regions.chart!, 'revenue')).toEqual(['bar', 'line']);
+    expect(compatibleKinds(negative, regions.chart!, 'revenue')).toEqual(['bar']);
     const pie = shape(
       chartOption(regions, regions.chart!, {
         kind: 'pie',
@@ -233,6 +286,33 @@ describe('结果表画成图的配置', () => {
     ]);
     expect(pie.title).toMatchObject({ text: '600', subtext: '销售额' });
     expect(pie.legend?.formatter('华东')).toBe('{name|华东}{value|300}{pct|50%}');
+  });
+
+  it('饼图在窄卡片里（网页嵌入的小窗、手机）换紧凑排法：环小一点、图例只写名字和占比，长名字截短', () => {
+    const long = {
+      ...regions,
+      rows: [
+        ['华东大区销售一部', 300],
+        ['华南', 200],
+        ['华北', 100],
+      ],
+    } as TableCard;
+    const pie = chartOption(long, regions.chart!, { kind: 'pie', measure: 'revenue', tokens: TOKENS }) as {
+      readonly legend: { readonly formatter: (name: string) => string };
+      readonly media: readonly {
+        readonly query: { readonly maxWidth: number };
+        readonly option: {
+          readonly legend: { readonly formatter: (name: string) => string };
+          readonly series: readonly { readonly radius: readonly string[] }[];
+        };
+      }[];
+    };
+    expect(pie.legend.formatter('华东大区销售一部')).toBe('{name|华东大区销售…}{value|300}{pct|50%}');
+    const narrow = pie.media[0];
+    expect(narrow?.query.maxWidth).toBeGreaterThan(400);
+    expect(narrow?.option.legend.formatter('华南')).toBe('{name|华南}{pct|33%}');
+    expect(narrow?.option.legend.formatter('华东大区销售一部')).toBe('{name|华东大…}{pct|50%}');
+    expect(narrow?.option.series[0]?.radius).toEqual(['36%', '54%']);
   });
 
   it('刻度写短；色板用完再用两档灰，不用红', () => {

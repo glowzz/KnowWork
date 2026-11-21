@@ -2,22 +2,37 @@
  * 一个会话的视图：消息列表、运行详情与底部输入框。对话页（ChatPage）和嵌在别的页面里的会话（EmbeddedChat）共用；
  * 给了 answerMode 就按它发消息、不显示回答方式下拉。
  */
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
-import type { AnswerMode, QuestionAnswer, SendMode } from '../../api/conversations';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  warmConversation,
+  type AnswerMode,
+  type QuestionAnswer,
+  type SendMode,
+} from '../../api/conversations';
+import type { SentAttachment } from '../../api/attachments';
 import type { Mention } from '../../api/mentions';
 import { ownRun, turnOfRun } from '../../api/debug';
+import { readableError } from '../../api/http';
+import { useEmbedMode } from '../embed/embedMode';
 import { toast } from '../../ui/toastStore';
 import { CONVERSATIONS_KEY } from '../conversations/queries';
 import { Composer } from './components/Composer';
+import { FileLinks } from './components/Markdown';
 import { MessageList } from './components/MessageList';
 import { selectLastUserMessage, selectRunState } from './events/selectors';
 import { useConversation, type FirstMessage, type TurnExtras } from './hooks/useConversation';
+import { useFileLinks } from './hooks/useFileLinks';
+import { PlaceLabel } from './components/PlaceSelect';
 import { useFeedback } from './hooks/useFeedback';
 import { resolveMentions } from './mentions/resolve';
+import { SERVER_SOURCE, type ConversationSource } from './sources';
+import { turnEnded } from './turnEnds';
+import { cx } from '../../ui/cx';
 
 // 运行详情（运行调试视图）不常用，点开时才加载
 const RunInspector = lazy(() => import('../debug/RunInspector'));
+const WARM_INTERVAL_MS = 60_000;
 
 const CONNECTION_TEXT = {
   connecting: '正在连接…',
@@ -30,15 +45,27 @@ interface Props {
   /** 刚发出的第一条（新建会话的那一页带过来），回显之前先摆上 */
   readonly firstMessage?: FirstMessage;
   readonly answerMode?: AnswerMode;
+  /** 输入框的占位文字；正在跑时照样提示「补充要求或下一条消息」 */
   readonly placeholder?: string;
   /** 输入框下面那行小字（见 Composer） */
-  readonly footnote?: string;
+  readonly footnote?: ReactNode;
   /** 一轮跑完（运行中变回空闲）时调：嵌入的页面据此刷新自己的数据，例如 Agent 刚改了页面上显示的东西 */
   readonly onTurnEnd?: () => void;
   /** 输入框正上方的内容（例如嵌入的页面写「正在看：订单」） */
   readonly above?: ReactNode;
   /** 用户发的每一条（不含插话）发出前过一遍，例如嵌入的页面在开头带上正在看的对象 */
   readonly decorate?: (text: string) => string;
+  /** 最上面一行（挂了范围的对话顶部，例如专家的头像与名字），一直在 */
+  readonly top?: ReactNode;
+  /** 还没问过时摆在输入框上面的一块（开场白、快捷提问），这时它和输入框一起在页面中间；ask 等同在输入框里打了这句发出去 */
+  readonly intro?: (ask: (text: string) => void) => ReactNode;
+  /** 挂了范围的对话：@ 候选按它的范围取（服务端收窄） */
+  readonly scoped?: boolean;
+  /** 输入框里显示对话模型下拉（聊天页给，嵌在别的页面里的会话不给） */
+  readonly chooseModel?: boolean;
+  /** 这段对话在哪执行（sources.ts）：默认业务服务。别处执行的，发消息、停止、审批交给来源，输入框按来源的 limits 置灰，
+   *  输入框下面写明在哪执行；读的都是业务服务，反馈、运行详情照常有 */
+  readonly source?: ConversationSource;
 }
 
 function ConnectionNotice({ state, message }: { readonly state: string; readonly message?: string }) {
@@ -61,22 +88,71 @@ export function ConversationView({
   onTurnEnd,
   above,
   decorate,
+  top,
+  intro,
+  scoped = false,
+  chooseModel = false,
+  source = SERVER_SOURCE,
 }: Props) {
+  const server = source.server;
   const feedback = useFeedback(conversationId);
   const client = useQueryClient();
+  // 操作交给来源（云端交业务服务，本机交这台电脑），能不能在这里继续也问它；读都走业务服务
+  const actions = source.actions;
+  // @ 工作文件夹里的文件：只有执行的一方看得到文件夹时有（本机对话）
+  const listReferences = source.files?.references;
+  const references = useMemo(
+    () => (listReferences ? (query: string) => listReferences(conversationId, query) : undefined),
+    [listReferences, conversationId],
+  );
+  const sourceDrop = source.dropFiles;
+  const dropFiles = useMemo(
+    () => (sourceDrop ? (files: readonly File[]) => sourceDrop(files, conversationId) : undefined),
+    [sourceDrop, conversationId],
+  );
+  const continuing = useQuery({
+    queryKey: ['conversations', conversationId, 'continue', source.id],
+    queryFn: () => actions.check(conversationId),
+    staleTime: Infinity,
+  });
+  // 问不到能不能在这里继续（例如这台电脑上的本机执行环境没起来）：照不能继续处理，写出原因，不让人发出去才报错
+  const blocked = continuing.isError
+    ? readableError(continuing.error, '这里暂时不能继续这段对话，请稍后再试')
+    : (continuing.data ?? null);
+  // 回答里的文件链接：在业务服务上执行的直接读服务端；别处执行的，确认了这里能继续（别的电脑上看本机会话不行）才能点开
+  const here = server || (continuing.isSuccess && continuing.data === null);
+  const fileLinks = useFileLinks(conversationId, here ? source.files : undefined);
   const { state, connection, connectionMessage, send, cancel, decide, answer } = useConversation(
     conversationId,
     firstMessage,
     answerMode,
+    actions,
   );
   const running = selectRunState(state) !== 'idle';
   const wasRunning = useRef(false);
   useEffect(() => {
-    if (wasRunning.current && !running) onTurnEnd?.();
+    if (wasRunning.current && !running) {
+      onTurnEnd?.();
+      // 也按对话通知扩展的来源（例如云端在线编辑一轮结束查改动，turnEnds.ts）
+      turnEnded(conversationId);
+    }
     wasRunning.current = running;
-  }, [running, onTurnEnd]);
+  }, [running, onTurnEnd, conversationId]);
   const [inspecting, setInspecting] = useState<number>();
+  // 加了附件就预热（宿主上的对话、沙箱容器空闲半小时会被回收），一分钟内只预热一次；结果不用管
+  const warmedAt = useRef(0);
+  const warm = useCallback(() => {
+    if (!server) return;
+    const now = Date.now();
+    if (now - warmedAt.current < WARM_INTERVAL_MS) return;
+    warmedAt.current = now;
+    void warmConversation(conversationId).catch(() => undefined);
+  }, [conversationId, server]);
   const onInspect = useCallback((runId: string) => setInspecting(turnOfRun(runId)), []);
+  // 网页嵌入页不看运行详情（embedMode.ts）
+  const embedMode = useEmbedMode();
+  const embedInspect = embedMode.inspect;
+  const canInspect = embedInspect;
 
   const deliver = useCallback(
     async (text: string, mode: SendMode, extras: TurnExtras = {}) => {
@@ -86,10 +162,10 @@ export function ConversationView({
     [send, client],
   );
   const onSend = useCallback(
-    (text: string, mode: SendMode, files: readonly File[], mentions: readonly Mention[]) =>
+    (text: string, mode: SendMode, attachments: readonly SentAttachment[], mentions: readonly Mention[]) =>
       running
-        ? deliver(text, mode, { files, mentions })
-        : deliver(decorate ? decorate(text) : text, 'followup', { files, mentions }),
+        ? deliver(text, mode, { attachments, mentions })
+        : deliver(decorate ? decorate(text) : text, 'followup', { attachments, mentions }),
     [deliver, running, decorate],
   );
   // 用同一个问题重新回答（重新生成、撤掉检索条件）：那一问 @ 的东西照原样带上，不然就悄悄放宽成全部知识库
@@ -139,43 +215,83 @@ export function ConversationView({
     [answer],
   );
 
+  const empty = connection === 'connected' && !running && selectLastUserMessage(state) === undefined;
+  const ask = (text: string) => void onSend(text, 'followup', [], []);
+  const opening = empty && intro !== undefined;
+  // 有开场时开场和输入框一起居中（kw-chat-intro）；问过以后照常消息在上、输入框贴底，输入框在树里的位置不变、不会重新挂载
+  // 外面一层左右两栏：能编辑的文件打开时编辑区并排在右边、只开文件面板时右边是一栏目录树（useFileLinks 的 pane）。这层一直在，对话这一栏在树里的位置不变，
+  // 开关编辑区时输入框不重新挂载（草稿不丢）
   return (
-    <div className="kw-chat">
-      <div className="kw-chat-scroll">
-        <ConnectionNotice state={connection} message={connectionMessage} />
-        <MessageList
-          state={state}
-          onDecide={onDecide}
-          onAnswer={onAnswer}
-          onRegenerate={onRegenerate}
-          onDropConditions={onDropConditions}
-          onInspect={onInspect}
-          feedback={feedback}
-        />
-      </div>
-      {inspecting !== undefined ? (
-        <Suspense fallback={null}>
-          <RunInspector
-            source={ownRun(conversationId)}
-            turn={inspecting}
-            onClose={() => setInspecting(undefined)}
+    <div
+      className={cx(
+        'kw-chat-split',
+        fileLinks.paneMode === 'file' && 'is-open',
+        fileLinks.paneMode === 'files' && 'is-files',
+      )}
+    >
+      <div className={opening ? 'kw-chat kw-chat-intro' : 'kw-chat'}>
+        {fileLinks.tools ? <div className="kw-chat-tools">{fileLinks.tools}</div> : null}
+        {top}
+        <div className="kw-chat-scroll">
+          <ConnectionNotice state={connection} message={connectionMessage} />
+          {opening ? intro(ask) : null}
+          <FileLinks opener={fileLinks.opener}>
+            <MessageList
+              state={state}
+              onDecide={onDecide}
+              rememberable={actions.remembersApprovals === true}
+              onAnswer={onAnswer}
+              // 这里不能继续这段对话（在别的电脑上执行）：只能看，不给重新回答
+              onRegenerate={blocked === null ? onRegenerate : undefined}
+              onDropConditions={blocked === null ? onDropConditions : undefined}
+              onInspect={canInspect ? onInspect : undefined}
+              feedback={feedback}
+              onAsk={ask}
+            />
+          </FileLinks>
+        </div>
+        {fileLinks.preview}
+        {inspecting !== undefined ? (
+          <Suspense fallback={null}>
+            <RunInspector
+              source={ownRun(conversationId)}
+              turn={inspecting}
+              onClose={() => setInspecting(undefined)}
+            />
+          </Suspense>
+        ) : null}
+        <div className="kw-composer-dock">
+          {above}
+          <Composer
+            running={running}
+            onSend={onSend}
+            onStop={cancel}
+            initialMentions={firstMessage?.mentions}
+            disabled={connection === 'failed' || blocked !== null}
+            answerMode={answerMode}
+            limits={source.limits}
+            below={
+              server ? undefined : (
+                <div className="kw-place-row">
+                  <PlaceLabel source={source} />
+                  {source.Controls && blocked === null ? (
+                    <source.Controls conversationId={conversationId} />
+                  ) : null}
+                </div>
+              )
+            }
+            placeholder={blocked ?? (running ? undefined : placeholder)}
+            footnote={footnote ?? source.footnote}
+            conversationId={conversationId}
+            mentionScope={scoped ? { conversationId } : undefined}
+            fileReferences={references}
+            dropFiles={blocked === null ? dropFiles : undefined}
+            onAttach={warm}
+            chooseModel={chooseModel}
           />
-        </Suspense>
-      ) : null}
-      <div className="kw-composer-dock">
-        {above}
-        <Composer
-          running={running}
-          onSend={onSend}
-          onStop={cancel}
-          initialMentions={firstMessage?.mentions}
-          disabled={connection === 'failed'}
-          answerMode={answerMode}
-          placeholder={placeholder}
-          footnote={footnote}
-          conversationId={conversationId}
-        />
+        </div>
       </div>
+      {fileLinks.pane}
     </div>
   );
 }

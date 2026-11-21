@@ -16,9 +16,10 @@ from typing import Any, Protocol
 
 from pydantic import ValidationError
 
-from ..sandbox.contract import INPUT_DIR, SandboxError
+from ..sandbox.contract import SandboxError
 from ..sessionfiles.names import InvalidFileName, clean_name
 from ..tools.registry import BuiltinTool, ToolContext, ToolFailure, ToolSpec
+from ..workpath import INPUT, SANDBOX
 from .citation_store import CitationStore
 from .errors import KnowledgeError
 from .models import MAX_FETCH_PAGES, FetchedFile, FetchRequest
@@ -116,7 +117,8 @@ def fetch_tool(service: KnowledgeService, citations: CitationStore, sandbox: Ses
                 await sandbox.put_input(ctx.workspace_id, ctx.session_id, name, file.data)
             except SandboxError as error:
                 raise ToolFailure(f"放进工作区没有成功：{error}") from error
-            placed.append({"path": f"{INPUT_DIR}/{name}", "type": file.mime, "size": len(file.data),
+            # 工具结果是业务服务直接写给模型的：按沙箱挂载点给出模型在会话里看到的写法（/workspace/input/...）
+            placed.append({"path": SANDBOX.at(INPUT.child(name)), "type": file.mime, "size": len(file.data),
                            **({"page": file.page} if file.page else {})})
         images = any(f.mime.startswith("image/") for f in files)
         notes = [IMAGE_NOTE if images else FILE_NOTE]
@@ -127,4 +129,4 @@ def fetch_tool(service: KnowledgeService, citations: CitationStore, sandbox: Ses
                     "含义）时先用它取图，再用 read_image 读返回的 path；图用检索或阅读结果里的图 id（如 IMG:2:0），"
                     f"图要连同周围文字一起看或跨页时取页图（给 source_id、doc_ref 和页码，一次最多 {MAX_FETCH_PAGES} 页）；"
                     "要算表格里的数时取原文件交给 Python。",
-        FETCH_SCHEMA, "read", concurrent=True), handler)
+        FETCH_SCHEMA, "read", concurrent=True, needs_sandbox=True), handler)

@@ -108,8 +108,46 @@ class Addon(Demo):
     requires = ("demo",)
 
 
+class Free(Demo):
+    """不需要授权模块的扩展（license_module 为 None）：装了就启用，授权有没有、过没过期都不影响它。"""
+
+    name = "free"
+    license_module = None
+    rls_tables = ()
+    migrations = None
+
+
+class Editing(Free):
+    """提供编辑器（setup_editor）的扩展：整个 ASGI 应用挂在编辑器端口上，原样看到请求的路径；WebSocket 上每收到一条回它的长度。"""
+
+    name = "editing"
+
+    def setup_editor(self, ctx):
+        async def echo_lengths(receive, send):
+            await receive()  # websocket.connect
+            await send({"type": "websocket.accept"})
+            while (message := await receive())["type"] == "websocket.receive":
+                size = len(message.get("text") or "") or len(message.get("bytes") or b"")
+                await send({"type": "websocket.send", "text": str(size)})
+
+        async def app(scope, receive, send):
+            if scope["type"] == "websocket":
+                await echo_lengths(receive, send)
+                return
+            if scope["type"] != "http":
+                return
+            body = f'{{"editor": true, "path": "{scope["raw_path"].decode()}"}}'.encode()
+            await send({"type": "http.response.start", "status": 200,
+                        "headers": [(b"content-type", b"application/json")]})
+            await send({"type": "http.response.body", "body": body})
+
+        return app
+
+
 EXTENSION = Demo()
 ADDON = Addon()
+EDITING = Editing()
+FREE = Free()
 BROKEN = Broken()
 BROKEN_INSIDE = BrokenInside()
 PUBLIC_ONLY = PublicOnly()

@@ -41,6 +41,7 @@ from ..sandbox import SandboxModule, SandboxSettings, build_sandbox
 from ..sandbox.unavailable import UnavailableSandbox
 from ..storage import namespaced_stores, session_stores
 from . import logredact
+from .eventloop import loop_factory
 
 log = logging.getLogger(__name__)
 
@@ -113,10 +114,12 @@ def build_worker(settings: Settings, jobs: JobSettings | None = None, *,
         sandbox.on_created(attachments.service.restage)  # 这边新建了会话容器，也把已就绪的附件放进去
     runner = JobRunner(scoped, pools=jobs.pools)
     attachments.parse_job.register(runner)
+    attachments.expire_job.register(runner)
     http = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=120.0))
     models = ModelClient(catalog_for_worker(plain, settings.master_key.get_secret_value()), http)
     # 回合结束后判断知识库答上了没有，每个空间一小时一批（入队在 api 进程的 knowledge.search_log）
     AnswerChecker(scoped, models).register(runner)
+    attachments.digest_job(models).register(runner)  # 长附件的导读：要调模型，模型客户端建好以后再接
     context = WorkerContext(settings=settings, engine=engine, sessionmaker=scoped, runner=runner, stores=stores,
                             sandbox=session_sandbox, models=models, gate=gate, mineru=attachments.mineru,
                             stores_for=lambda namespace: namespaced_stores(settings, namespace),
@@ -166,7 +169,7 @@ async def run(stop: asyncio.Event | None = None) -> bool:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     logredact.install()
-    if asyncio.run(run()):
+    if asyncio.run(run(), loop_factory=loop_factory()):
         sys.exit(EXIT_LICENSE_ENDED)
 
 

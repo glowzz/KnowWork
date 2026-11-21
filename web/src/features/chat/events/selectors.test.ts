@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { formatDuration, hasProcess, selectRunSearch, summarizeProcess } from './selectors';
+import { ev } from './fixtures';
+import { chatReducer, initialChatState, reduceWire } from './reducer';
+import {
+  formatDuration,
+  hasProcess,
+  selectAwaitingReply,
+  selectRunSearch,
+  summarizeProcess,
+} from './selectors';
 import type { RunView, StepView } from './types';
 
 const run = (patch: Partial<RunView> = {}): RunView => ({
@@ -68,6 +76,13 @@ describe('summarizeProcess', () => {
     expect(hasProcess(run({ endedAt: 1 }))).toBe(false);
     expect(hasProcess(run({ endedAt: 1, notes: ['x'] }))).toBe(true);
     expect(hasProcess(run({ endedAt: 1, problems: ['x'] }))).toBe(true);
+    expect(hasProcess(run({ endedAt: 1, thinking: ['想'] }))).toBe(true);
+  });
+
+  it('只有思考没有步骤时写「已思考」', () => {
+    expect(summarizeProcess(run({ startedAt: 0, endedAt: 12_000, thinking: ['想'] }))).toBe(
+      '已思考 · 用时 12 秒',
+    );
   });
 });
 
@@ -96,5 +111,21 @@ describe('selectRunSearch', () => {
   it('没检索或检索没带条件时没有', () => {
     expect(selectRunSearch(run({ steps: [step('done')] }))).toBeUndefined();
     expect(selectRunSearch(run({ steps: [searched('a', ['s:1'], [])] }))).toBeUndefined();
+  });
+});
+
+describe('selectAwaitingReply', () => {
+  it('刚发出、这一轮还没开始时显示「思考中」；这一轮开始、发送失败后不再显示', () => {
+    const sent = chatReducer(initialChatState, {
+      type: 'local/sent',
+      localId: 'l1',
+      text: '你好',
+      mode: 'followup',
+    });
+    expect(selectAwaitingReply(sent)).toBe(true);
+    const delivered = chatReducer(sent, { type: 'local/delivered', localId: 'l1', messageId: 'm1' });
+    expect(selectAwaitingReply(delivered)).toBe(true);
+    expect(selectAwaitingReply(reduceWire(delivered, ev.runStarted(1)))).toBe(false);
+    expect(selectAwaitingReply(chatReducer(sent, { type: 'local/failed', localId: 'l1' }))).toBe(false);
   });
 });

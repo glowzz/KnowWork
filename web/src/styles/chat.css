@@ -1,14 +1,131 @@
 /* 对话页：消息、回答正文、引用、执行过程、审批与提问卡片、文件卡片、输入框。 */
 /* ---------- 对话页 ---------- */
+/* 对话与并排的编辑区（照 ChatGPT Canvas）：平时只有对话一栏；能编辑的 Word 打开时对话收窄到左边，编辑区占其余 */
+.kw-chat-split {
+  display: flex;
+  height: 100%;
+}
+
+.kw-chat-split > .kw-chat {
+  flex: 1;
+  min-width: 0;
+}
+
+.kw-chat-split.is-open > .kw-chat {
+  flex: 0 0 clamp(320px, 28%, 480px);
+  border-right: 1px solid var(--color-border-subtle);
+}
+
 .kw-chat {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
 }
 
+/* 对话栏右上角的按钮（文件面板），浮在消息上面 */
+.kw-chat-tools {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 2;
+  display: flex;
+  gap: 4px;
+}
+
+/* 只开文件面板时：对话栏不收窄，右边一栏目录树（照官方的工作区文件） */
+.kw-chat-split.is-files > .kw-chat {
+  flex: 1;
+  border-right: 1px solid var(--color-border-subtle);
+}
+
+.kw-files-pane {
+  display: flex;
+  flex: 0 0 320px;
+  flex-direction: column;
+  min-width: 0;
+  background: var(--color-surface);
+}
+
+/* 工作文件夹的位置：太长保留末尾、省略号在左边，悬停看全 */
+.kw-files-root {
+  padding: 8px 16px 4px;
+  overflow: hidden;
+  color: var(--color-text-secondary);
+  font-size: var(--font-text-sm-size);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  direction: rtl;
+}
+
+.kw-files-root > span {
+  unicode-bidi: plaintext;
+}
+
+.kw-files-body {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 8px 16px;
+  overflow-y: auto;
+}
+
+.kw-file-tree-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.kw-file-tree-name > span:last-child {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.kw-file-tree-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--color-text-secondary);
+}
+
+.kw-file-tree .kw-tree-row.is-hidden .kw-tree-title {
+  color: var(--color-text-tertiary);
+}
+
+.kw-file-tree-note {
+  padding-top: 4px;
+  padding-bottom: 4px;
+  color: var(--color-text-secondary);
+  font-size: var(--font-text-sm-size);
+  list-style: none;
+}
+
 .kw-chat-scroll {
   flex: 1;
   overflow-y: auto;
+}
+
+/* 挂了范围的对话（扩展给它定了名字与回答方式）顶部那行名字，扩展没画自己的顶部时用：和消息列同宽居中 */
+.kw-chat-scope {
+  flex: none;
+  width: 100%;
+  max-width: var(--kw-chat-max-width);
+  margin: 0 auto;
+  padding: 16px 16px 0;
+  box-sizing: border-box;
+  color: var(--color-text-secondary);
+  font-size: var(--font-text-sm-size);
+}
+
+/* 挂了范围的对话还没问过：开场和输入框一起在中间（同新对话页），顶部那行照样在最上面。上下的空白平分 */
+.kw-chat-intro > .kw-chat-scroll {
+  flex: none;
+  margin-top: auto;
+}
+
+.kw-chat-intro > .kw-composer-dock {
+  margin-bottom: auto;
 }
 
 .kw-chat-column {
@@ -23,6 +140,14 @@
   display: flex;
   flex-direction: column;
   justify-content: center;
+}
+
+/* 新对话按了发送、对话还在建：和会话页一样，消息区占满、输入框贴底 */
+.kw-chat-starting {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 /* 嵌在别的页面里的会话还没开始时：上面一句说明，输入框贴底 */
@@ -144,6 +269,73 @@
   font-size: var(--kw-font-xs);
 }
 
+.kw-attachment-note {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  color: var(--kw-text-secondary);
+  font-size: var(--kw-font-xs);
+}
+
+/* 发送前等附件解析：输入框里卡片下面一行说明加「直接发送」 */
+.kw-composer-waiting {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px 0;
+  color: var(--kw-text-secondary);
+  font-size: var(--kw-font-xs);
+}
+
+/* 定时任务这类自动发起的一轮：照官方对话界面，一条细边框的可展开通知，次要色，不画成用户气泡 */
+.kw-trigger {
+  margin: 16px 0;
+  border: 1px solid var(--kw-border-secondary);
+  border-radius: var(--kw-radius-card);
+}
+
+.kw-trigger-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  background: transparent;
+  color: var(--kw-text-secondary);
+  font-size: var(--kw-font-sm);
+  text-align: left;
+  cursor: pointer;
+}
+
+.kw-trigger-head:hover {
+  color: var(--kw-text);
+}
+
+.kw-trigger-head time {
+  margin-left: auto;
+  font-size: var(--kw-font-xs);
+}
+
+.kw-trigger-body {
+  padding: 0 14px 12px 36px;
+}
+
+.kw-trigger-explain {
+  margin: 0 0 6px;
+  color: var(--kw-text-secondary);
+  font-size: var(--kw-font-xs);
+}
+
+.kw-trigger-text {
+  max-height: 240px;
+  overflow: auto;
+  font-size: var(--kw-font-sm);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .kw-user-bubble {
   max-width: 70%;
   background: var(--kw-user-bubble-bg);
@@ -180,6 +372,24 @@
    链接色、知识库图片、mermaid 图、表格的横向滚动 */
 .kw-markdown a {
   color: var(--kw-link);
+}
+
+/* 回答里的文件链接（照 DSH 官方）：和链接同色，平时不带下划线，悬停、键盘聚焦时虚线下划线；是按钮，点了在右侧预览 */
+.kw-markdown .kw-file-link {
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--kw-link);
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.kw-markdown .kw-file-link:hover,
+.kw-markdown .kw-file-link:focus-visible {
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
 }
 
 .kw-markdown img {
@@ -432,6 +642,16 @@ a.kw-source-item:hover {
   margin-left: 4px;
 }
 
+/* 刚发出、这一轮还没开始时的「思考中」：样子同下面的执行过程摘要，只是不能点 */
+.kw-process-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  color: var(--kw-text-secondary);
+  font-size: var(--kw-font-sm);
+}
+
 .kw-process-toggle {
   display: inline-flex;
   align-items: center;
@@ -450,6 +670,20 @@ a.kw-source-item:hover {
   padding: 0 0 0 14px;
   border-left: 2px solid var(--kw-border-secondary);
   list-style: none;
+}
+
+/* 思考中的预览（照 ChatGPT）：摘要下面几行，只露最新的部分、上沿渐隐；样子同展开后的执行过程 */
+.kw-thinking-preview {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  max-height: calc(var(--kw-font-sm) * 1.7 * 4);
+  margin: 6px 0 0;
+  padding: 0 0 0 14px;
+  border-left: 2px solid var(--kw-border-secondary);
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 45%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 45%);
 }
 
 .kw-step + .kw-step {
@@ -586,6 +820,8 @@ a.kw-source-item:hover {
 .kw-approval-actions {
   display: flex;
   gap: 8px;
+  /* 没有「不再询问」时也靠右 */
+  margin-left: auto;
 }
 
 .kw-approval-title {
@@ -997,12 +1233,53 @@ a.kw-source-item:hover {
 }
 
 /* 回答方式下拉里每项的说明：比模式名小一号、灰一档，一眼分得开名字和说明；选中项的名字加粗，说明不跟着加粗 */
+/* 输入框右下角的对话模型下拉：不抢输入区的地方，名字太长省略 */
+.kw-model-select {
+  min-width: 0;
+  max-width: 40%;
+}
+
+.kw-model-select button {
+  max-width: 100%;
+}
+
 .kw-answer-mode-description {
   margin-top: 2px;
   color: var(--color-text-secondary);
   font-size: var(--font-text-xs-size);
   line-height: var(--font-text-xs-line-height);
   font-weight: var(--font-weight-normal);
+}
+
+/* 输入框正下方的一排（新对话页的「在哪执行」与工作文件夹；在别处执行的对话写明在哪）：照 ChatGPT、Claude 桌面端靠左 */
+.kw-composer-below {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding: 6px 20px 0;
+}
+
+.kw-place-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  font-size: var(--font-text-sm-size);
+  color: var(--kw-text-secondary);
+}
+
+.kw-place-label svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* 会话页「在哪执行」与来源给的控件（例如本机对话的访问模式）排一行 */
+.kw-place-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
 }
 
 .kw-composer-hint {
@@ -1038,6 +1315,29 @@ a.kw-source-item:hover {
   border: 1px solid var(--color-border);
   border-radius: var(--kw-radius-card);
   background: var(--color-surface);
+}
+
+/* 接着问的建议（例如查不了时的换个问法）：标题、一段说明，下面一排胶囊按钮，窄了换行 */
+.kw-suggestions-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 16px;
+}
+
+.kw-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.kw-suggestion-text {
+  padding: 2px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  color: var(--color-text-secondary);
+  font-size: var(--kw-font-sm);
 }
 
 .kw-result-head {
@@ -1088,6 +1388,14 @@ a.kw-source-item:hover {
   padding-bottom: 8px;
 }
 
+/* 图上面一排的左边：切换画哪一组、图例，放不下时换行 */
+.kw-result-chart-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+
 .kw-result-legend {
   display: flex;
   flex-wrap: wrap;
@@ -1119,6 +1427,45 @@ a.kw-source-item:hover {
 
 .kw-echart {
   width: 100%;
+}
+
+/* 能下钻时：图上的项可点，表里那几列的取值是按钮（看着还是文字，悬停加下划线）；下面一行灰字提示能点 */
+.kw-echart.is-pickable {
+  cursor: pointer;
+}
+
+.kw-result-pick {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+  text-decoration: underline dotted var(--color-text-tertiary);
+  text-underline-offset: 3px;
+}
+
+.kw-result-pick:hover {
+  text-decoration: underline;
+}
+
+.kw-result-drill-hint {
+  margin: 0;
+  padding: 0 16px 8px;
+  color: var(--color-text-tertiary);
+  font-size: var(--kw-font-xs);
+}
+
+/* 换过的结果卡片（改条件、下钻）左上角「返回上一步」 */
+.kw-result-back {
+  padding: 6px 10px 0;
+}
+
+/* 横向柱状分类多、比一屏高时：图在卡片里滚动，一根柱子一行不挤 */
+.kw-echart-scroll {
+  max-height: 420px;
+  overflow-y: auto;
 }
 
 /* 表：不画竖线，表头浅灰底，行间细线，数字右对齐、等宽数字；宽了横向滚动 */
@@ -1190,10 +1537,12 @@ a.kw-source-item:hover {
   gap: 8px 12px;
 }
 
+/* 出处一行先占住剩下的宽度、字在自己里面换行，操作留在右边同一行（网页嵌入的小窗里卡片只有 300 来宽，原来出处
+   一长就把「下载」挤到下一行左边，展开的箭头也单独掉一行）；操作多到放不下时才整排换到下一行，仍靠右 */
 .kw-provenance-line {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  flex: 1 1 160px;
+  align-items: flex-start;
   gap: 6px;
   min-width: 0;
   text-align: left;
@@ -1201,21 +1550,30 @@ a.kw-source-item:hover {
   font-size: var(--kw-font-xs);
 }
 
+/* 箭头对着第一行字的中间：行高 21、箭头 12（不用 lh 单位，接入方用户的浏览器内核可能较旧） */
 .kw-provenance-line svg {
   flex: none;
+  margin-top: 4px;
   color: var(--color-text-tertiary);
 }
 
 .kw-provenance-label {
+  flex: none;
   color: var(--color-text);
   font-weight: 600;
+}
+
+.kw-provenance-text {
+  min-width: 0;
 }
 
 /* 出处上的操作（扩展登记的，例如「存为可信查询」）：在出处行右边 */
 .kw-provenance-actions {
   display: flex;
   flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 6px;
+  margin-left: auto;
 }
 
 .kw-provenance-body {
@@ -1284,4 +1642,61 @@ a.kw-source-item:hover {
   margin: 0 auto 6px;
   color: var(--color-text-secondary);
   font-size: var(--font-text-xs-size);
+}
+
+/* 网页嵌入页（/embed/:key，在接入方网页的小窗里）与分享链接（/s/:key，整页）：顶上一条名字与操作，下面就是对话。
+   小窗里地方窄，对话占满宽度；分享链接整页打开时同对话页一样限宽居中 */
+.kw-embed {
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  background: var(--kw-content-bg);
+  overflow: hidden;
+}
+
+.kw-embed > .kw-chat,
+.kw-embed > .kw-page-state,
+.kw-embed > .kw-empty {
+  flex: 1;
+  min-height: 0;
+}
+
+.kw-embed-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 8px 8px 16px;
+  border-bottom: 1px solid var(--kw-border-secondary);
+}
+
+.kw-embed-title {
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: var(--kw-font-base);
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.kw-embed-actions {
+  display: flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+/* 分体按钮（照 DSH 官方文档预览顶部的「打开」）：主按钮与旁边的箭头贴成一个，箭头里是其他打开方式 */
+.kw-split-button {
+  display: inline-flex;
+}
+
+.kw-split-button > :first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.kw-split-button > :last-child {
+  margin-left: -1px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
 }

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  browserTimeZone,
   cancelRun,
   createConversation,
   decideApproval,
@@ -9,6 +10,7 @@ import {
   MAX_MESSAGE_LENGTH,
   renameConversation,
   sendMessage,
+  turnRequest,
   validateMessage,
   validateTitle,
 } from './conversations';
@@ -36,14 +38,17 @@ describe('conversations api', () => {
       'DELETE /api/workspaces/default/conversations/*': new Response(null, { status: 204 }),
     });
     await expect(createConversation('标'.repeat(300))).resolves.toEqual({ id: 'c1', title: 't' });
-    await sendMessage('a/b', 'hi', 'steer');
-    await sendMessage('c1', '再答', 'followup', {
-      answerMode: 'quick',
-      droppedConditions: ['部门 = 财务部'],
-      mentions: [
-        { type: 'document', id: 'kb1/d1', name: '差旅办法.pdf', base: 'builtin.kb1', baseName: '制度库' },
-      ],
-    });
+    await sendMessage('a/b', turnRequest('hi', 'steer'));
+    await sendMessage(
+      'c1',
+      turnRequest('再答', 'followup', {
+        answerMode: 'quick',
+        droppedConditions: ['部门 = 财务部'],
+        mentions: [
+          { type: 'document', id: 'kb1/d1', name: '差旅办法.pdf', base: 'builtin.kb1', baseName: '制度库' },
+        ],
+      }),
+    );
     await cancelRun('c1');
     await decideApproval('c1', 'ap 1', true);
     await renameConversation('c1', '  新名  ');
@@ -56,9 +61,11 @@ describe('conversations api', () => {
     });
     expect(send?.body).not.toHaveProperty('dropped_conditions');
     expect(send?.body).not.toHaveProperty('answer_mode');
+    const zone = browserTimeZone();
     expect(resend?.body).toEqual({
       text: '再答',
       mode: 'followup',
+      ...(zone ? { time_zone: zone } : {}),
       answer_mode: 'quick',
       dropped_conditions: ['部门 = 财务部'],
       mentions: [
@@ -75,6 +82,28 @@ describe('conversations api', () => {
     expect(eventsUrl('c 1')).toBe('/api/workspaces/default/conversations/c%201/events');
   });
 
+  it('发消息带上浏览器时区（模型按它算「今天」）；取不到时不带', async () => {
+    const api = routeFetch({
+      'POST /api/workspaces/default/conversations/*/messages': jsonResponse({ messageId: 'm' }, 202),
+    });
+    const real = Intl.DateTimeFormat;
+    const zoned = vi
+      .spyOn(Intl, 'DateTimeFormat')
+      .mockImplementation(
+        () => ({ resolvedOptions: () => ({ timeZone: 'Asia/Shanghai' }) }) as Intl.DateTimeFormat,
+      );
+    await sendMessage('c1', turnRequest('合同到期了吗', 'followup'));
+    zoned.mockImplementation(() => {
+      throw new RangeError('no time zone');
+    });
+    await sendMessage('c1', turnRequest('再看看', 'followup'));
+    zoned.mockRestore();
+    expect(Intl.DateTimeFormat).toBe(real);
+    const [withZone, withoutZone] = api.calls;
+    expect(withZone?.body).toMatchObject({ time_zone: 'Asia/Shanghai' });
+    expect(withoutZone?.body).not.toHaveProperty('time_zone');
+  });
+
   it('列表分页：带游标、解析下一页，坏数据丢弃', async () => {
     const api = routeFetch({
       'GET /api/workspaces/default/conversations': jsonResponse({
@@ -88,14 +117,14 @@ describe('conversations api', () => {
     });
     const page = await listConversations('2026-10-20T00:00:00+00:00');
     expect(page.items).toEqual([
-      { id: 'c1', title: '周报', createdAt: null, updatedAt: '2026-10-19T00:00:00+00:00' },
+      { id: 'c1', title: '周报', source: '', createdAt: null, updatedAt: '2026-10-19T00:00:00+00:00' },
     ]);
     expect(page.next).toBe('2026-10-18T00:00:00+00:00');
     expect(api.calls[0]?.query.get('before')).toBe('2026-10-20T00:00:00+00:00');
     expect(api.calls[0]?.query.get('limit')).toBe('30');
   });
 
-  it('新建会话带上第一条消息的 @ 与回答方式（没有 @ 时不带）', async () => {
+  it('新建会话带上第一条消息的回答方式与 @（服务端按回答方式定进不进「最近」）', async () => {
     const api = routeFetch({
       'POST /api/workspaces/default/conversations': jsonResponse({ id: 'c1', title: 't' }, 201),
     });
@@ -108,6 +137,7 @@ describe('conversations api', () => {
     } as const;
     await createConversation('合同模板有哪些内容', { answerMode: 'agent', mentions: [mention] });
     await createConversation('你好', { answerMode: 'agent' });
+    await createConversation('没选回答方式');
     expect(api.calls.map((c) => c.body)).toEqual([
       {
         title: '合同模板有哪些内容',
@@ -118,7 +148,8 @@ describe('conversations api', () => {
           ],
         },
       },
-      { title: '你好' },
+      { title: '你好', first_turn: { answer_mode: 'agent' } },
+      { title: '没选回答方式' },
     ]);
   });
 

@@ -22,6 +22,7 @@ const LABELS: Readonly<Record<string, string>> = {
   job_kill: '停止后台任务',
   job_list: '查看后台任务',
   kw_now: '获取当前时间',
+  show_result: '展示结果',
   skill: '加载技能',
   subagent: '交给子任务',
   send_message: '给子任务发消息',

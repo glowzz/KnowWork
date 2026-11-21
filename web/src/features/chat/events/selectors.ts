@@ -55,6 +55,14 @@ function unechoedSent(state: ChatState): readonly SentMessage[] {
   });
 }
 
+/**
+ * 刚发出、这一轮还没开始：消息列表末尾先显示「思考中」，不等发送接口返回、宿主开始这一轮（冷的时候要两三秒）。
+ * 有一轮正在跑（插话、排队的消息）时不显示，那一轮自己有进度；发送失败的已经从列表里拿掉了。
+ */
+export function selectAwaitingReply(state: ChatState): boolean {
+  return state.openRun === undefined && unechoedSent(state).length > 0;
+}
+
 function askedEntry(index: number, asked: AskedMessage): TimelineEntry {
   const { id, text, attachments, mentions } = asked;
   return {
@@ -76,8 +84,10 @@ export function selectTimeline(state: ChatState): readonly TimelineEntry[] {
         return { type: 'user' as const, message };
       });
   state.runOrder.forEach((runId, index) => {
-    const asked = (state.runs[runId]?.asked ?? []).map((m) => askedEntry(index, m));
-    entries.push(...usersBefore(index), ...asked, { type: 'run', runId });
+    const run = state.runs[runId];
+    const asked = (run?.asked ?? []).map((m) => askedEntry(index, m));
+    const trigger = run?.trigger ? [{ type: 'trigger' as const, trigger: run.trigger }] : [];
+    entries.push(...usersBefore(index), ...trigger, ...asked, { type: 'run', runId });
   });
   entries.push(...usersBefore(Number.POSITIVE_INFINITY));
   return entries;
@@ -123,6 +133,17 @@ export function selectRunCards(run: RunView): readonly ResultCard[] {
   return run.steps.flatMap((s) => (s.status === 'done' && s.cards ? s.cards : []));
 }
 
+const pad = (n: number) => String(n).padStart(2, '0');
+
+/** 某个时刻：今天的只写几点几分，别的日子带上月日。 */
+export function formatClock(time: number, now: Date = new Date()): string {
+  const at = new Date(time);
+  const clock = `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+  return at.toDateString() === now.toDateString()
+    ? clock
+    : `${at.getMonth() + 1}月${at.getDate()}日 ${clock}`;
+}
+
 export function formatDuration(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000));
   if (seconds < 60) return `${seconds} 秒`;
@@ -151,14 +172,14 @@ export function summarizeProcess(run: RunView, preparing: readonly string[] = []
   }
   const elapsed =
     run.startedAt !== undefined && run.endedAt !== undefined ? run.endedAt - run.startedAt : undefined;
-  const head = count > 0 ? `已完成 ${count} 个步骤` : '已完成';
+  const head = count > 0 ? `已完成 ${count} 个步骤` : run.thinking.length > 0 ? '已思考' : '已完成';
   const timeText = elapsed !== undefined && elapsed > 0 ? ` · 用时 ${formatDuration(elapsed)}` : '';
   return `${head}${timeText}`;
 }
 
-/** 这一轮是否有可展开的执行细节。模型思考原文不展示，不算细节。 */
+/** 这一轮是否有可展开的执行细节：步骤、说明、问题，或模型的思考（照 ChatGPT，点开能看完整的思考）。 */
 export function hasDetails(run: RunView): boolean {
-  return run.steps.length > 0 || run.notes.length > 0 || run.problems.length > 0;
+  return run.steps.length > 0 || run.notes.length > 0 || run.problems.length > 0 || run.thinking.length > 0;
 }
 
 /** 这一轮是否需要显示执行过程那一行。 */

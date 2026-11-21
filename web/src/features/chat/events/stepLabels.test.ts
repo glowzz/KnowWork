@@ -32,6 +32,10 @@ describe('官方工具的步骤说明', () => {
     expect(stepTarget(s)).toBe('报告.docx、明细.xlsx');
   });
 
+  it('展示结果（查询结果和模型直接交的数据都走它）', () => {
+    expect(stepLabel(step('show_result', { query_ids: ['anql_1'] }))).toBe('展示结果');
+  });
+
   it('记下知识库缺口显示缺什么', () => {
     const s = step('knowledge_gap', { missing: '会员续费的退款规则' });
     expect(stepLabel(s)).toBe('记下知识库缺口');

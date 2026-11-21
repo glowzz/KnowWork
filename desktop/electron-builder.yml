@@ -1,0 +1,40 @@
+# 桌面端的打包配置。M6 交付：安装包 + 更新清单从 CI 出（.github/workflows/desktop.yml），
+# 交付包整理见 desktop/scripts/build-delivery.mjs，对应网关的 /desktop/ 位置（deploy/gateway/nginx.conf）。
+# 这一版安装包不签名：Mac 第一次打开要在「系统设置 → 隐私与安全性」里放行，Windows 提示「未知发布者」。
+appId: com.knowwork.desktop
+productName: KnowWork 桌面端
+directories:
+  output: release
+# 更新清单（latest*.yml）只有配置了 publish 才会产出；feed 的真实地址运行时 setFeedURL 覆盖
+# （网关的 /desktop/，desktop/src/main/update.mjs），这里的占位只是让构建把清单生成出来
+publish:
+  provider: generic
+  url: https://knowwork.invalid/desktop/
+files:
+  - src/**/*
+  - package.json
+  - "!tests/**"
+  - "!scripts/**"
+  - "!release/**"
+  - "!resources/**"
+# 自带运行时（scripts/prepare-runtime.mjs 先备齐 resources/）：本机宿主的配置档与依赖树、
+# 独立 Node（24.9+，宿主与 PTC 用）、Python（清单与沙箱镜像同一份）、LibreOffice（Office 引擎）
+extraResources:
+  - { from: resources/runtime-host, to: runtime-host }
+  - { from: resources/node, to: node }
+  - { from: resources/python, to: python }
+  - { from: resources/office, to: office }
+protocols:
+  - name: KnowWork
+    schemes:
+      - knowwork
+mac:
+  target:
+    - { target: dmg, arch: [arm64] }
+    - { target: zip, arch: [arm64] }
+  category: public.app-category.productivity
+  identity: null
+win:
+  target:
+    - { target: nsis, arch: [x64] }
+    - { target: zip, arch: [x64] }

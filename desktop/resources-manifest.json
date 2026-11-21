@@ -1,0 +1,35 @@
+{
+  "说明": "桌面端自带运行时的钉版清单：Python 的库与云端沙箱镜像（deploy/docker/sandbox.Dockerfile）同一份清单、同一个版本（tests/manifest.test.mjs 核对）。自带 Word/Excel/PPT 技能在两边做出来的东西一致。",
+  "python": {
+    "version": "3.12",
+    "distribution": "Debian trixie（与沙箱镜像一致）",
+    "packages": {
+      "pandas": "2.2.3",
+      "numpy": "2.1.3",
+      "openpyxl": "3.1.5",
+      "XlsxWriter": "3.2.0",
+      "matplotlib": "3.9.2",
+      "python-docx": "1.2.0",
+      "python-pptx": "1.0.2",
+      "Pillow": "11.0.0",
+      "tabulate": "0.9.0",
+      "lxml": "5.3.0",
+      "defusedxml": "0.7.1",
+      "markitdown[docx,pptx,xlsx,pdf]": "0.1.2"
+    }
+  },
+  "node": {
+    "host": "24.9.0",
+    "hostNote": "本机宿主（runtime-host 的 engines 是 >=24.9.0）与 PTC 运行时都用它；沙箱镜像里 PTC 用 Node 22，行为差异仅在这一个工具上",
+    "npmGlobals": {
+      "docx": "9.5.1",
+      "pptxgenjs": "4.0.1",
+      "react": "18.3.1",
+      "react-dom": "18.3.1",
+      "react-icons": "5.5.0",
+      "sharp": "0.34.3"
+    }
+  },
+  "libreoffice": "25.2.5",
+  "dsh": "0.2.2-rc.5"
+}

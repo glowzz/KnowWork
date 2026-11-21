@@ -70,6 +70,22 @@ async def test_list_rename_and_isolation(sessionmaker):
     await writer.close()
 
 
+async def test_listing_by_ids_fetches_only_my_own_in_one_request(sessionmaker):
+    """侧栏按本机工作区分组时，列表里还没翻到的对话按编号一次取齐：只有本人的，最近有动静的在前，不分页；太多拒绝。"""
+    kernel, erased = FakeKernel(), []
+    alice, bob, pump, writer = stack(kernel, sessionmaker, erased)
+    async with alice, bob:
+        first = (await alice.post(CONV, json={"title": "第一个"})).json()["id"]
+        second = (await alice.post(CONV, json={"title": "第二个"})).json()["id"]
+        others = (await bob.post(CONV, json={"title": "别人的"})).json()["id"]
+        await alice.post(f"{CONV}/{first}/messages", json={"text": "hi"})
+        got = (await alice.get(CONV, params={"ids": f"{second},{others},c_missing,{first},{first}"})).json()
+        assert [c["id"] for c in got["items"]] == [first, second] and got["next"] is None
+        assert (await alice.get(CONV, params={"ids": ",".join(f"c_{n}" for n in range(51))})).status_code == 422
+    await pump.close()
+    await writer.close()
+
+
 async def test_delete_releases_host_session_and_erases_everything(sessionmaker):
     kernel, erased = FakeKernel([[session_event(1, "turn/start", {"turn": 1})]]), []
     alice, bob, pump, writer = stack(kernel, sessionmaker, erased)
@@ -91,3 +107,19 @@ async def test_delete_releases_host_session_and_erases_everything(sessionmaker):
         assert (await alice.delete(f"{CONV}/{cid}")).status_code == 404
     await pump.close()
     await writer.close()
+
+
+async def test_event_stream_starts_with_a_comment_so_proxies_forward_headers_at_once():
+    """事件流一开头先发一行注释：还没有任何事件的对话（扩展先建好、还没问过的），经开发服务器这类 Node 代理时，
+    响应头要等第一段内容才转给浏览器，不先发一行就要干等到 15 秒后的第一个心跳，页面一直写「正在连接…」。"""
+    from knowwork_server.conversations.api import event_stream
+    from knowwork_server.conversations.replay import Outgoing
+
+    async def feed():
+        yield Outgoing(sse_id="1", type="run.started", payload={"seq": 1})
+        yield Outgoing(sse_id=None, type="live", payload={"text": "你"})
+
+    items = [item async for item in event_stream(feed())]
+    assert items[0].comment == "connected" and items[0].encode() == b": connected\r\n\r\n"
+    assert items[1:] == [{"id": "1", "event": "run.started", "data": '{"seq": 1}'},
+                         {"event": "live", "data": '{"text": "你"}'}]

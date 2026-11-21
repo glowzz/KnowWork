@@ -1,6 +1,7 @@
 /**
- * 业务服务沙箱内部接口的测试桩（/internal/extensions/sandbox/{exec,stat,read,list,write}）。
- * 每个令牌对应一个会话；`/sessions/<会话>` 对到一个本地临时目录（扮演容器的 /workspace），exec 真的在那里跑。
+ * 业务服务沙箱内部接口的测试桩（/internal/extensions/sandbox/{exec,stat,read,list,write,delete}）。
+ * 每个令牌对应一个会话；请求里的路径是工作区路径（相对写法，根是空串，同真实业务服务的 workpath.decode），
+ * 对到一个本地临时目录（扮演容器的 /workspace），exec 真的在那里跑。
  * 只为验证宿主侧的远程执行器接线，容器本身的行为由业务服务的测试负责。
  *
  * 给了 ssh.containers（会话 → 容器名）时另提供流式执行的两个接口，照业务服务的做法落到真实容器：
@@ -10,7 +11,7 @@
 import { createServer } from 'node:http'
 import { execFile, execFileSync, spawn } from 'node:child_process'
 import { WebSocketServer } from 'ws'
-import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, posix } from 'node:path'
 
@@ -52,10 +53,10 @@ export async function startSandboxStub({ sessionsByToken, ssh }) {
     return workspaces.get(sessionId)
   }
   const local = (sessionId, path) => {
-    const root = `/sessions/${sessionId}`
-    const normal = posix.normalize(path)
-    if (normal !== root && !normal.startsWith(`${root}/`)) return undefined
-    return join(workspaceOf(sessionId), normal.slice(root.length))
+    if (typeof path !== 'string' || path.startsWith('/')) return undefined
+    const normal = path === '' ? '' : posix.normalize(path).replace(/\/+$/, '')
+    if (normal === '..' || normal.startsWith('../')) return undefined
+    return join(workspaceOf(sessionId), normal === '.' ? '' : normal)
   }
   const statOf = (file, follow) => {
     let info
@@ -97,6 +98,15 @@ export async function startSandboxStub({ sessionsByToken, ssh }) {
       mkdirSync(dirname(file), { recursive: true })
       writeFileSync(file, Buffer.from(body.data, 'base64'))
       return { stat: statOf(file, true) }
+    },
+    // 同业务服务的 delete：只删文件，不在、是目录照错误码报
+    delete: (session, body) => {
+      const file = local(session, body.path)
+      const stat = statOf(file, false)
+      if (stat === null) throw Object.assign(new Error('文件不存在'), { code: 'not_found' })
+      if (stat.kind === 'd') throw Object.assign(new Error('该路径是目录'), { code: 'is_directory', status: 400 })
+      rmSync(file)
+      return {}
     },
   }
 

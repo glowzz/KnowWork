@@ -30,20 +30,46 @@ test('系统提示用中文的企业助手人设，要求调工具前先说明�
     assert.ok(system.includes('KnowWork 企业智能助手'), `系统提示里没有人设：${system.slice(0, 300)}`)
     assert.ok(system.includes('调用工具前，先用一两句话告诉用户你要做什么'), '人设里没有工具前说明的要求')
     assert.ok(!system.includes('software engineer assistant'), '官方英文人设没有被替换')
-    assert.ok(system.includes('```mermaid'), '系统提示里没有说对话界面能显示 mermaid 图')
+    // 画 mermaid 示意图写在自带技能 diagram 里，要用时才加载，系统提示里不常驻（问数里会被引着在正文再画一遍图）
+    assert.ok(!system.includes('mermaid'), '系统提示里不该常驻 mermaid 的说明')
   } finally {
     await host.stop()
   }
 })
 
-test('换了人设（KNOWWORK_PERSONA）也还告诉模型对话界面能显示 mermaid 图', async () => {
+test('扩展给对话定的身份（例如专家）进系统提示、只换这个会话的人设，通用要求还在；身份清空回到默认人设', async () => {
+  const host = await startHost({ sequence: ['success', 'success', 'success'], successText: '好' })
+  try {
+    await host.call('POST', '/v1/sessions', { sessionId: 'expert-1' })
+    await host.call('POST', '/v1/sessions', { sessionId: 'plain-1' })
+    const persona = '你是专家「经营分析」：查销售、财务数据，按认证过的口径算数。'
+    await host.call('POST', '/v1/sessions/expert-1/messages', { text: '你是谁', context: { standing: '', turn: '', persona } })
+    await collectEvents(host, 'expert-1', isTurnEnd)
+    const expert = JSON.stringify(host.llm.requests.at(-1)?.body?.system ?? '')
+    assert.ok(expert.includes('你是专家「经营分析」'), `系统提示里没有专家的身份：${expert.slice(0, 300)}`)
+    assert.ok(!expert.includes('KnowWork 企业智能助手'), '部署人设没有被这个会话的身份替换')
+    assert.ok(expert.includes('调用工具前，先用一两句话告诉用户你要做什么'), '换了身份，人设后缀里的通用要求丢了')
+    await host.call('POST', '/v1/sessions/plain-1/messages', { text: '你是谁' })
+    await collectEvents(host, 'plain-1', isTurnEnd)
+    const plain = JSON.stringify(host.llm.requests.at(-1)?.body?.system ?? '')
+    assert.ok(plain.includes('KnowWork 企业智能助手') && !plain.includes('经营分析'), '别的会话不该受影响')
+    await host.call('POST', '/v1/sessions/expert-1/messages', { text: '还在吗', context: { standing: '', turn: '', persona: '' } })
+    await collectEvents(host, 'expert-1', (frame) => isTurnEnd(frame) && host.llm.requests.length >= 3)
+    const cleared = JSON.stringify(host.llm.requests.at(-1)?.body?.system ?? '')
+    assert.ok(cleared.includes('KnowWork 企业智能助手') && !cleared.includes('经营分析'), '身份清空后没回到默认人设')
+  } finally {
+    await host.stop()
+  }
+})
+
+test('换了人设（KNOWWORK_PERSONA）系统提示里是换上的人设', async () => {
   const host = await startHost({ sequence: ['success'], successText: '好' }, { KNOWWORK_PERSONA: '你是测试助手。' })
   try {
     await host.call('POST', '/v1/sessions', { sessionId: 'persona-2' })
     await host.call('POST', '/v1/sessions/persona-2/messages', { text: '你好' })
     await collectEvents(host, 'persona-2', isTurnEnd)
     const system = JSON.stringify(host.llm.requests[0]?.body?.system ?? '')
-    assert.ok(system.includes('你是测试助手。') && system.includes('```mermaid'), system.slice(0, 300))
+    assert.ok(system.includes('你是测试助手。') && !system.includes('KnowWork 企业智能助手'), system.slice(0, 300))
   } finally {
     await host.stop()
   }
@@ -55,7 +81,7 @@ test('发给模型的消息里没有工作目录上下文（无用、泄露服�
     await host.call('POST', '/v1/sessions', { sessionId: 'ctx-1' })
     await host.call('POST', '/v1/sessions/ctx-1/messages', { text: '短剧有哪些代表作品？' })
     await collectEvents(host, 'ctx-1', isTurnEnd)
-    // 只看模型读得到的部分；官方模拟服务的请求另带 dsh_session_log（测试专用，真实网关请求没有）
+    // 只看模型读得到的部分
     const body = host.llm.requests[0]?.body ?? {}
     const request = JSON.stringify({ system: body.system, messages: body.messages })
     assert.ok(request.includes('短剧有哪些代表作品？'), '提问应当在请求里')
@@ -66,7 +92,7 @@ test('发给模型的消息里没有工作目录上下文（无用、泄露服�
   }
 })
 
-/** 模型读得到的部分：系统提示与消息（官方模拟服务另带的 dsh_session_log 不算）。 */
+/** 模型读得到的部分：系统提示与消息。 */
 function modelInput(host, index = 0) {
   const body = host.llm.requests[index]?.body ?? {}
   return JSON.stringify({ system: body.system, messages: body.messages })
@@ -106,16 +132,19 @@ test('没有下发语言时不附语言规则；语言值不合法时拒收', as
   }
 })
 
-test('附件：每个文件在提问之后一行说明（逐字照官方 fileHandleText），会话历史里留着；路径不在 /workspace/input 拒收', async () => {
-  const host = await startHost({ sequence: ['success', 'success'], successText: '好' })
+test('附件：每个文件在提问之后一行说明（逐字照官方 fileHandleText），会话历史里留着；合同里给工作区路径、写给模型的是 /workspace/input/...，附件目录外的拒收', async () => {
+  const host = await startHost({ sequence: ['success', 'success', 'success', 'success'], successText: '好' })
   try {
     await host.call('POST', '/v1/sessions', { sessionId: 'att-1' })
-    const file = { name: '合同 "终版".docx', path: '/workspace/input/合同 "终版".docx', bytes: 2048, sha256: 'a'.repeat(64) }
-    const bad = await host.call('POST', '/v1/sessions/att-1/messages', { text: '看看', attachments: [{ ...file, path: '/etc/passwd' }] })
-    assert.equal(bad.status, 400)
+    const file = { name: '合同 "终版".docx', path: 'input/合同 "终版".docx', bytes: 2048, sha256: 'a'.repeat(64) }
+    // 合同里是工作区路径：附件目录外的、越出工作区的、旧的容器写法都拒收
+    for (const path of ['/etc/passwd', '../input/a.docx', 'output/a.docx', '/workspace/input/a.docx', 'input/a/b.docx']) {
+      const bad = await host.call('POST', '/v1/sessions/att-1/messages', { text: '看看', attachments: [{ ...file, path }] })
+      assert.equal(bad.status, 400, path)
+    }
     await host.call('POST', '/v1/sessions/att-1/messages', {
       text: '帮我改一下付款条款',
-      attachments: [{ ...file, extractedPath: '/workspace/input/合同 "终版".md' }],
+      attachments: [{ ...file, extractedPath: 'input/合同 "终版".md' }],
     })
     await collectEvents(host, 'att-1', isTurnEnd)
     const first = modelInput(host, 0)
@@ -128,6 +157,42 @@ test('附件：每个文件在提问之后一行说明（逐字照官方 fileHan
     await host.call('POST', '/v1/sessions/att-1/messages', { text: '再看一遍第三条' })
     await collectEvents(host, 'att-1', frame => isTurnEnd(frame) && host.llm.requests.length >= 2)
     assert.ok(modelInput(host, 1).includes(handle), '下一轮模型仍看得到这个文件')
+
+    // 解析还没完成（用户点了「直接发送」、接口调用）：告诉模型解析结果会放在哪、现在还没有
+    const notAPath = await host.call('POST', '/v1/sessions/att-1/messages', {
+      text: '看看', attachments: [{ ...file, extractionPending: true }],
+    })
+    assert.equal(notAPath.status, 400, '没有 Markdown 路径时不能只说「还在解析」')
+    await host.call('POST', '/v1/sessions/att-1/messages', {
+      text: '总结一下',
+      attachments: [{ ...file, extractedPath: 'input/合同 "终版".md', extractionPending: true }],
+    })
+    await collectEvents(host, 'att-1', frame => isTurnEnd(frame) && host.llm.requests.length >= 3)
+    const third = modelInput(host, 2)
+    assert.ok(third.includes(inJson('[Markdown extracted from "合同 \\"终版\\".docx" by the document parser is not ready yet: parsing is still running and the result will be saved at "/workspace/input/合同 \\"终版\\".md"')))
+
+    // 给模型读的文字：放得下的整篇跟在后面，放不下的给字数、页数和目录；格式不对的目录整条拒收
+    const small = { name: '说明.txt', path: 'input/说明.txt', bytes: 6, sha256: 'b'.repeat(64), text: '付款 30 天', textChars: 6 }
+    const scan = { name: '扫描.pdf', path: 'input/扫描.pdf', bytes: 9, sha256: 'c'.repeat(64), extractedPath: 'input/扫描.md', text: '# 承诺书', textChars: 6, textPages: 2 }
+    const big = {
+      ...file, extractedPath: 'input/合同 "终版".md', textChars: 90000, textPages: 30,
+      outline: [{ line: 1, text: '第 1 页：封面' }, { line: 88, text: '## 第二章 付款' }],
+      digestPath: 'input/合同 "终版".导读.md',
+    }
+    const badOutline = await host.call('POST', '/v1/sessions/att-1/messages', {
+      text: '看看', attachments: [{ ...big, outline: [{ line: 0, text: 'x' }] }],
+    })
+    assert.equal(badOutline.status, 400)
+    await host.call('POST', '/v1/sessions/att-1/messages', { text: '对比一下', attachments: [small, scan, big] })
+    await collectEvents(host, 'att-1', frame => isTurnEnd(frame) && host.llm.requests.length >= 4)
+    const fourth = modelInput(host, 3)
+    assert.ok(fourth.includes(inJson('[Contents of "说明.txt" (6 characters, the text of "/workspace/input/说明.txt"), included in full so this turn needs no file read.')))
+    assert.ok(fourth.includes(inJson('付款 30 天')))
+    // 整篇给的写明共几页、这就是全部文字，模型不用怀疑没读全、再去转原件
+    assert.ok(fourth.includes(inJson('[Contents of "扫描.pdf" (6 characters across 2 pages, the text of "/workspace/input/扫描.md"), included in full so this turn needs no file read. This is all the text in the file, all 2 pages; there is no need to extract the original again.')))
+    assert.ok(fourth.includes(inJson('[Contents of "合同 \\"终版\\".docx": too long to include (90000 characters across 30 pages).')))
+    assert.ok(fourth.includes(inJson('L1: 第 1 页：封面\nL88: ## 第二章 付款')))
+    assert.ok(fourth.includes(inJson('A digest of it is at "/workspace/input/合同 \\"终版\\".导读.md": an overall summary, then each section\'s key points with line ranges.')))
   } finally {
     await host.stop()
   }

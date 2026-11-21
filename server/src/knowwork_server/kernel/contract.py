@@ -4,10 +4,12 @@
 宿主协议的变化只改实现，不改这里；这里的变化必须升版本号。
 """
 
+import json
+import re
 from collections.abc import AsyncIterator
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 SCHEMA_VERSION = "kernel.v1"
 
@@ -32,6 +34,13 @@ class SessionPolicy(_Frozen):
     gate: SkillGate | None = None
 
 
+class SessionOwner(_Frozen):
+    """对话的属主。宿主的多用户适配层据此记录、比对属主级资源（定时任务这类）的归属，不据此判权限。"""
+
+    workspace_id: str = Field(min_length=1, max_length=128)
+    user_id: str = Field(min_length=1, max_length=128)
+
+
 class SessionSpec(_Frozen):
     session_id: str = Field(pattern=r"^[A-Za-z0-9_.:-]{1,128}$")
     policy: SessionPolicy = SessionPolicy()
@@ -40,16 +49,38 @@ class SessionSpec(_Frozen):
     tools_token: str | None = Field(default=None, min_length=16, repr=False)
     # 技能令牌（受众 skills）：宿主据此拉取本会话可用技能清单与技能正文；为空则本会话没有技能。
     skills_token: str | None = Field(default=None, min_length=16, repr=False)
+    # 属主：不给时宿主上属主级插件（定时任务等）对这个会话不可用
+    owner: SessionOwner | None = None
+
+
+class OutlineEntry(_Frozen):
+    """附件目录里的一条：在那份文字（解析出的 Markdown，或纯文本原件）里的行号与标题。"""
+
+    line: int = Field(ge=1)
+    text: str = Field(min_length=1, max_length=200)
 
 
 class TurnAttachment(_Frozen):
-    """本轮消息附带的一个文件：已在本会话容器的 /workspace/input 里（照官方 dsh-attachment，模型按需读）。"""
+    """本轮消息附带的一个文件：已在本会话工作区的附件目录 input/ 里（照官方 dsh-attachment，模型按需读）。
+    路径是工作区路径（workpath.py，例如 input/合同.pdf），给模型看哪种写法由宿主按自己的挂载点定。"""
 
     name: str = Field(min_length=1, max_length=200)
-    path: str = Field(pattern=r"^/workspace/input/[^/]{1,200}$")
+    path: str = Field(pattern=r"^input/[^/]{1,200}$")
     bytes: int = Field(ge=0)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    extracted_path: str | None = Field(default=None, pattern=r"^/workspace/input/[^/]{1,200}$")
+    extracted_path: str | None = Field(default=None, pattern=r"^input/[^/]{1,200}$")
+    # 文档解析还没完成：extracted_path 是解析好以后放的位置，现在那里还没有文件。网页发送前会等解析完，
+    # 用户点了「直接发送」、或经接口发来的消息才会这样
+    extraction_pending: bool = False
+    # 给模型读的文字（附件 reading.py）：放得下的全文直接放进这一轮（text）；放不下的只给字数、页数与目录，
+    # 模型按行号分段读。文字是解析出的 Markdown，纯文本附件就是原件本身
+    text: str | None = Field(default=None, max_length=1_000_000)
+    text_chars: int | None = Field(default=None, ge=0)
+    text_pages: int | None = Field(default=None, ge=1)
+    outline: tuple[OutlineEntry, ...] = Field(default=(), max_length=200)
+    # 导读（附件 digest_job.py）：全文摘要与各段要点（带原文行号），放不进对话的长文档才有；还在生成时 digest_pending
+    digest_path: str | None = Field(default=None, pattern=r"^input/[^/]{1,200}$")
+    digest_pending: bool = False
 
 
 class KnowledgeEntry(_Frozen):
@@ -95,14 +126,21 @@ class TurnContext(_Frozen):
 
     - standing（常驻）：会话里一直有效的，宿主照知识库目录的办法发——内容没变不重发（不动前缀缓存），变了追加一份新的，
       从有变成空时追加一句「不再适用」；
-    - turn：只和这一轮有关的（例如按本轮提问召回的几条），宿主紧跟在本轮提问后面追加一次。"""
+    - turn：只和这一轮有关的（例如按本轮提问召回的几条），宿主紧跟在本轮提问后面追加一次；
+    - persona：这段对话的身份（例如专家是谁、管什么、怎么回答），宿主放进系统提示里部署人设的那一段（官方的作用域段，只替换
+      这个会话的），比追加在对话里的背景分量重，问「你是谁」按它答；空的照部署的默认人设。部署人设后面的通用要求不受影响。"""
 
     standing: str = Field(default="", max_length=8000)
     turn: str = Field(default="", max_length=4000)
+    persona: str = Field(default="", max_length=8000)
 
 
 # 回答方式的标识：内置 agent、quick，扩展可以登记别的（conversations/answer_modes.py）
 ANSWER_MODE_PATTERN = r"^[a-z][a-z0-9_]{0,31}$"
+# 模型别名（同 models.schemas 的 Alias）：输入框选的模型，宿主按它换这段对话的模型
+MODEL_ALIAS_PATTERN = r"^[A-Za-z0-9_.:-]{1,64}$"
+EXTENSION_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,39}$")
+EXTENSION_STATE_MAX_BYTES = 64 * 1024
 
 
 class AnswerModeSpec(_Frozen):
@@ -116,6 +154,8 @@ class TurnInput(_Frozen):
     text: str = Field(min_length=1, max_length=200_000)
     mode: Literal["followup", "steer"] = "followup"
     language: Literal["zh", "en"] | None = None  # 用户在聊天页指定的语言；不给时按提问判断（kernel/locale.py）
+    # 提问人的时区（IANA 名字，网页取浏览器的）：模型按它算「今天」。不给时宿主用部署时区，名字不合规时宿主也改用部署时区
+    time_zone: str | None = Field(default=None, min_length=1, max_length=64)
     # 回答方式：智能体、只查知识库的快速问答，或扩展登记的。宿主在这条消息进入步骤时切换，会话中途可以换
     answer_mode: str = Field(default="agent", pattern=ANSWER_MODE_PATTERN)
     answer_mode_spec: AnswerModeSpec | None = None  # 扩展登记的方式由业务服务发消息时现算
@@ -125,6 +165,23 @@ class TurnInput(_Frozen):
     mentions: tuple[TurnMention, ...] = Field(default=(), max_length=30)
     # 扩展补的上下文（conversations/turn_context.py）；None = 这轮没算（宿主沿用上一轮的常驻那段，也没有这一轮的那段）
     context: TurnContext | None = None
+    # 输入框选的模型别名；宿主按官方会话级选择换（存进会话，之后不带也沿用）。None = 不换
+    model: str | None = Field(default=None, pattern=MODEL_ALIAS_PATTERN)
+    # 扩展随这一轮交给宿主插件的状态（conversations/turn_state.py），按扩展名分、各自的 JSON，宿主收下就记进会话状态，
+    # 扩展自己的宿主插件读。例如 Office 编辑：这段对话此刻在编辑器里开着哪几份（插件据此决定给不给模型编辑器工具）。
+    # 在用户设备上执行的对话，设备交给本机宿主之前可以补上自己的（编辑器在那台电脑上）。None = 这轮没算，宿主沿用上一轮的
+    extension_state: dict[str, Any] | None = None
+
+    @field_validator("extension_state")
+    @classmethod
+    def _extension_state(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is None:
+            return None
+        if len(value) > 16 or any(not EXTENSION_NAME_PATTERN.match(name) for name in value):
+            raise ValueError("extension_state 的扩展名不合规")
+        if len(json.dumps(value, ensure_ascii=False).encode()) > EXTENSION_STATE_MAX_BYTES:
+            raise ValueError("extension_state 太大")
+        return value
 
 
 class KernelEvent(_Frozen):
@@ -199,6 +256,14 @@ class QuestionAnswer(_Frozen):
     answers: tuple[QuestionAnswerItem, ...] = Field(min_length=1, max_length=64)
 
 
+class HostModel(_Frozen):
+    """推给宿主的一个可选对话模型：宿主据此声明官方模型适配器的路由（id 就是模型网关认的别名）。"""
+
+    id: str = Field(pattern=MODEL_ALIAS_PATTERN)
+    name: str = Field(min_length=1, max_length=200)
+    vision: bool = False
+
+
 class BundledSkill(_Frozen):
     """宿主内置的技能（KnowWork 随宿主发的 Word、Excel、PPT 这类）：只给名字与说明，「技能」页与 @ 菜单列出来用。"""
 
@@ -233,6 +298,10 @@ class EpochMismatch(KernelError):
     """宿主重启过，旧游标失效。调用方应从头重新读取。"""
 
 
+class ModelUnknown(KernelError):
+    """宿主还没收到过这个模型（刚重启、还没推可选模型）。调用方推一次清单再发。"""
+
+
 class AgentKernel(Protocol):
     async def open_session(self, spec: SessionSpec) -> str: ...
 
@@ -257,5 +326,7 @@ class AgentKernel(Protocol):
     async def rotate_skill_credential(self, session_id: str, token: str) -> None: ...
 
     async def bundled_skills(self) -> tuple[BundledSkill, ...]: ...
+
+    async def sync_models(self, models: tuple[HostModel, ...]) -> None: ...
 
     def subscribe(self, session_id: str, *, after: int = 0, epoch: str | None = None) -> AsyncIterator[KernelEvent]: ...

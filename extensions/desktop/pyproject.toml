@@ -1,0 +1,18 @@
+[project]
+name = "knowwork-desktop"
+version = "0.1.0"
+description = "KnowWork 桌面端扩展：原生应用登录登记、设备路由、按受众换令牌、空间开关与用量上限"
+requires-python = ">=3.12,<3.13"
+# 运行在业务服务的同一个环境里（knowwork-server 已装），扩展只 import 不再声明依赖：
+# 独立打包时不拉主包，装进镜像的就是这一个 wheel（uv pip install --no-deps）
+dependencies = []
+
+[project.entry-points."knowwork.extensions"]
+desktop = "knowwork_desktop.extension:EXTENSION"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/knowwork_desktop"]
