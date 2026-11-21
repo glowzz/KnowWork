@@ -99,10 +99,11 @@ test('宿主起不来（脚本立即退出）：ready 拒绝并带 stderr', asyn
 test('宿主起不来（可执行文件不存在）：ready 给人话报错，不炸未捕获异常', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kw-host-noent-'))
   try {
+    const dshCli = writeStubDsh(dir)  // 入口要真实存在，缺的是可执行文件
     const exits = []
     const process_ = startHostProcess({
       nodePath: join(dir, '没有这个可执行文件'),
-      dshCli: join(dir, 'stub-dsh.mjs'),
+      dshCli,
       home: dir,
       onExit: (code, signal, stderr) => exits.push({ code, signal, stderr }),
     })
@@ -110,6 +111,18 @@ test('宿主起不来（可执行文件不存在）：ready 给人话报错，�
     assert.deepEqual(await process_.exited, { code: null, signal: null })
     assert.equal(exits.length, 1)
     assert.match(exits[0].stderr, /spawn:/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('宿主入口不存在：同步给出能动手的原因（Windows 的 spawn ENOENT 会误报到 exe 上）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kw-host-nocli-'))
+  try {
+    assert.throws(
+      () => startHostProcess({ nodePath: process.execPath, dshCli: join(dir, '没有.mjs'), home: dir }),
+      /宿主入口不存在[\s\S]*npm install/,
+    )
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
