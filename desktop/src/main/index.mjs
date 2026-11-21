@@ -17,6 +17,7 @@ import pkg from 'electron-updater'
 const { autoUpdater } = pkg
 import { createBusinessApi } from './api.mjs'
 import * as oauthClient from './auth/client.mjs'
+import { parseServer } from './auth/client.mjs'
 import { browserLogin } from './auth/login.mjs'
 import { clearServer, loadOrCreateDevice, loadServer, saveServer } from './config.mjs'
 import { parseConnectUrl } from './deeplink.mjs'
