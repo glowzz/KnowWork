@@ -14,7 +14,8 @@ export function createUpdater({ updater, server, log = () => {}, onUpdate = () =
   const listeners = new Set([onUpdate])
   let downloading = false
   let downloaded = false
-  let downloadEpoch = 0  // setServer 换 feed 时自增：旧 feed 的在途下载完成后不再置「已下载」
+  let downloadEpoch = 0        // setServer 换 feed 时自增：换到新服务器后旧 feed 的下载结果作废
+  let activeDownloadEpoch = null  // 在途下载的代次；download() 发起时记，完成回调里对不上就丢弃
 
   updater.on('update-available', info => {
     log('发现新版桌面端：', info?.version)
@@ -27,11 +28,14 @@ export function createUpdater({ updater, server, log = () => {}, onUpdate = () =
     for (const listener of listeners) listener({ kind: 'progress', percent: Math.round(progress?.percent ?? 0) })
   })
   updater.on('update-downloaded', info => {
-    const stale = downloadEpoch
-    downloaded = true
     downloading = false
-    log('新版下载完成，退出时安装：', info?.version, stale === downloadEpoch ? '' : '（旧服务器的在途下载，已过时忽略）')
-    if (stale !== downloadEpoch) return  // 旧 feed 的在途下载：feed 已换，装了就是跨服务器误装
+    // 代次对不上 = 旧 feed 的在途下载：feed 已换，装了就是跨服务器误装——丢弃
+    if (activeDownloadEpoch !== null && activeDownloadEpoch !== downloadEpoch) {
+      log('旧服务器的下载完成事件已过时忽略')
+      return
+    }
+    downloaded = true
+    log('新版下载完成，退出时安装：', info?.version)
     for (const listener of listeners) listener({ kind: 'downloaded', version: info?.version })
   })
   updater.on('error', error => {
@@ -42,7 +46,7 @@ export function createUpdater({ updater, server, log = () => {}, onUpdate = () =
 
   return {
     /** 服务地址变了（深链重连另一台服务器）：feed 跟着换、下载标记清零、代次自增——
-     * 旧 feed 的在途下载完成后不会把「已下载」状态带回来（跨服务器误装的窗口被代次挡住）。 */
+     * 旧 feed 的在途下载完成后会被代次核对丢弃（跨服务器误装的窗口被挡住）。 */
     setServer(origin) {
       downloading = false
       downloaded = false
@@ -55,10 +59,21 @@ export function createUpdater({ updater, server, log = () => {}, onUpdate = () =
     async download() {
       if (downloading || downloaded) return
       downloading = true
-      await updater.downloadUpdate().catch(error => {
+      activeDownloadEpoch = downloadEpoch
+      try {
+        await updater.downloadUpdate()
+      } catch (error) {
         downloading = false
         log('下载更新失败：', error)
-      })
+        return
+      }
+      downloading = false
+      // 完成时刻代次没变才置「已下载」；变了说明期间换过服务器，这一次下载算旧的
+      if (activeDownloadEpoch === downloadEpoch) {
+        downloaded = true
+        log('新版下载完成，退出时安装')
+        for (const listener of listeners) listener({ kind: 'downloaded', version: undefined })
+      }
     },
     installAndRestart() {
       updater.quitAndInstall()

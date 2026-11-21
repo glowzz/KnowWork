@@ -12,6 +12,7 @@ function stubUpdater() {
   }
   return {
     calls,
+    handlers,
     autoDownload: null,
     feedUrl: null,
     setFeedURL(feed) { calls.push(['feed', feed]); this.feed = feed },
