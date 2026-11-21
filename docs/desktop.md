@@ -367,7 +367,7 @@ git merge upstream/main --no-ff # 跟着上游发版同步
 | 等人提示 | `desktop/src/main/notify.mjs` | `approval/asked`/`question/requested` 且窗口不在前台才叫，同一项不重复；前台看过没处理，走开会再提醒一次 |
 | 胶水接线 | `desktop/src/main/index.mjs`、`preload` | 登录后后台拉起宿主（模型受众令牌随 env + 到期轮换）、`knowwork:start-conversation/send/cancel/decide/answer/delete/set-access/get-access/access-catalog/can-continue/place/pick-folder` 一组桥、通知弹窗与任务栏闪烁 |
 | 扩展前端包 | `extensions/desktop/web/src/` | `chat.sources` 登记「本机」来源（工作文件夹 Picker、三档 Controls、useBlocker、start/actions 全走桥）、`chat.place` 登记设备名提示；`KNOWWORK_WEB_EXTENSIONS` 指到 `extensions/desktop/web/src/index.ts` 即随网页版构建 |
-| 验证 | `desktop/tests/`（38 个用例，当时口径）+ 真机冒烟 `desktop/scripts/smoke-real-host.mjs` | | 托管/客户端/中继/编排/通知全过；真机冒烟用托管模块起真实 DSH 设备宿主 + 官方模拟模型服务（就绪、health、三档预设全在）；带扩展入口的网页版构建通过 |
+| 验证 | `desktop/tests/`（38 个用例，当时口径）+ 真机冒烟 `desktop/scripts/smoke-real-host.mjs` | 托管/客户端/中继/编排/通知全过；真机冒烟用托管模块起真实 DSH 设备宿主 + 官方模拟模型服务（就绪、health、三档预设全在）；带扩展入口的网页版构建通过 |
 
 ### 12.2 实现决定
 
