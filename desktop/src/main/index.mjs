@@ -322,6 +322,10 @@ async function startDeviceSide(origin, userData, tokens, folders) {
         KNOWWORK_MODEL_PROVIDER: 'knowwork-gateway',
         KNOWWORK_MODEL_BASE_URL: `${origin}/api/model/v1`,
         KNOWWORK_MODEL_TOKEN: model.accessToken,
+        // 工具桥与技能提供方拉本会话清单的地址：走网关的公开路径（业务服务挂的受众令牌鉴权端点）。
+        // 不传就落到 127.0.0.1:8001 的兜底——设备上没这个端口，openSession 拉清单失败、会话打不开
+        KNOWWORK_TOOLS_BASE_URL: `${origin}/api/extensions/tools`,
+        KNOWWORK_SKILLS_BASE_URL: `${origin}/api/extensions/skills`,
         // 开发态兜底用 Electron 二进制跑宿主（见 resolveRuntime）：env 里切到 Node 模式；真 node 不认这个变量
         ...(runtimeInfo.nodePath === process.execPath ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
         // 打包态把自带 Node/Python 前置进 PATH：宿主起的 bash 与技能脚本找得到（分隔符按平台）

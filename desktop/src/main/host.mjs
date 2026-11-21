@@ -98,7 +98,10 @@ export function startHostProcess({ nodePath, dshCli, home, env = {}, onExit, log
     stdio: ['pipe', 'pipe', 'pipe'],
   })
   let stderr = ''
-  child.stderr?.on('data', chunk => { stderr += chunk })
+  child.stderr?.on('data', chunk => {
+    stderr += chunk
+    log('宿主 stderr：', chunk.toString().trimEnd())
+  })
   let resolveExited
   const exited = new Promise(resolve => {
     resolveExited = resolve
@@ -110,7 +113,7 @@ export function startHostProcess({ nodePath, dshCli, home, env = {}, onExit, log
   })
   const ready = new Promise((resolve, reject) => {
     let out = ''
-    const timer = setTimeout(() => reject(new Error(`宿主 60 秒内未就绪\nstdout:${out}\nstderr:${stderr}`)), 60_000)
+    const timer = setTimeout(() => reject(new Error(`宿主 60 秒内未就绪（宿主日志见上面）\nstderr 尾部:${stderr.slice(-1500)}`)), 60_000)
     const fail = error => {
       clearTimeout(timer)
       reject(error)
@@ -125,18 +128,24 @@ export function startHostProcess({ nodePath, dshCli, home, env = {}, onExit, log
     })
     child.stdout?.on('data', chunk => {
       out += chunk
-      for (const line of out.split('\n')) {
+      let index
+      while ((index = out.indexOf('\n')) !== -1) {
+        const line = out.slice(0, index)
+        out = out.slice(index + 1)
+        if (line.length === 0) continue
         try {
           const parsed = JSON.parse(line)
           if (parsed.knowworkHostReady === true) {
             clearTimeout(timer)
             resolve({ port: parsed.port, epoch: parsed.epoch })
+            continue
           }
         } catch { /* 非就绪行 */ }
+        log('宿主：', line)  // 宿主自己的日志（openSession 失败的栈等）也送到桌面日志，出事不用瞎猜
       }
     })
     child.once('exit', (code, signal) => {
-      fail(new Error(`宿主退出 code=${code} signal=${signal}\nstderr:${stderr || '（空）'}\nstdout 末尾：${out.slice(-1500) || '（空）'}`))
+      fail(new Error(`宿主退出 code=${code} signal=${signal}（宿主日志见上面）\nstderr:${stderr || '（空）'}`))
     })
   })
   return { child, ready, exited, stop: () => { child.stdin?.end(); child.kill() } }
