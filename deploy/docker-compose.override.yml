@@ -6,3 +6,5 @@ services:
     image: knowwork-server:desktop
   model-gateway:
     image: knowwork-server:desktop
+  gateway:
+    image: knowwork-gateway:desktop
