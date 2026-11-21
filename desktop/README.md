@@ -34,7 +34,7 @@ scripts/
 ├── build-delivery.mjs      # M6：安装包 + 更新清单 → 交付目录（网关 /desktop/）
 ├── manifest.mjs            # 清单的 ESM 出口
 └── smoke-real-host.mjs     # 真机冒烟：托管模块起真实 DSH 设备宿主 + 官方模拟模型服务
-tests/                # node:test，56 个用例（纯逻辑全量 + 清单一致性 + 更新；Electron 胶水不进单测）
+tests/                # node:test，58 个用例（纯逻辑全量 + 清单一致性 + 更新；Electron 胶水不进单测）
 ```
 
 纯逻辑模块零依赖、零构建（同 runtime-host 的路子）；`login` 编排的浏览器一步是注入的，
@@ -74,8 +74,9 @@ npm run dist         # electron-builder：Mac（arm64 dmg/zip）与 Windows（x6
 ```sh
 node scripts/prepare-runtime.mjs --platform darwin|win32   # 备齐 resources/（含独立 Node 与清单钉版）
 npx electron-builder --mac --arm64 | --win --x64           # 出安装包（未签名）
-node scripts/build-delivery.mjs                            # 安装包 + 更新清单 → deploy/html/desktop/<版本>/
+node scripts/build-delivery.mjs                            # 安装包 + 更新清单 → deploy/html/desktop/（feed 根）
 ```
 
-CI（`.github/workflows/desktop.yml`）在 mac/win 构建机上自动跑同一条流水线；版本清单见
-`desktop/resources-manifest.json`（与沙箱镜像的一致性由 `tests/manifest.test.mjs` 钉着）。
+CI（`.github/workflows/desktop.yml`，手动触发）在 mac/win 构建机上跑 prepare 与 electron-builder
+并上传产物；交付包整理（build-delivery.mjs）是人工步骤。版本清单见 `desktop/resources-manifest.json`
+（与沙箱镜像的一致性由 `desktop/tests/manifest.test.mjs` 钉着）。

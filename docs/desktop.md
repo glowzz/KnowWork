@@ -284,7 +284,7 @@ git merge upstream/main --no-ff # 跟着上游发版同步
 | 设备路由 | `src/knowwork_desktop/routes.py`（`/api/desktop`） | 建对话、开会话合同、准备一轮、收事件/逐字片段、查游标、记审批授权、对话模型清单、`/place`（别处只读的设备名提示）、DELETE（扩展收回）、管理路由 `admin/space/{workspace_id}/settings` |
 | 两张表 | `src/knowwork_desktop/tables.py` + 迁移 `desktop_0001` | `desktop_conversation`（本机会话的设备绑定）、`desktop_space`（空间开关与月度轮次上限）；分支 `desktop` 接在主线 0055 之后 |
 | 存储层 | `src/knowwork_desktop/store.py` | 绑定与开关的读写、自然月区间 |
-| 测试 | `server/tests/desktop/`（conftest 把扩展 src 加进 import 路径） | 12 个用例全过：闸门（只认桌面端登录、设备比对、属主 404）、空间开关拦建对话与准备一轮但不拦历史与事件、事件序号与子会话游标、交换受众的四道闸、管理接口权限、配额 429 说法与恢复日期、删除解绑、迁移分支幂等 |
+| 测试 | `server/tests/desktop/`（conftest 把扩展 src 加进 import 路径） | 12 个用例全过（后续补到 13）：闸门（只认桌面端登录、设备比对、属主 404）、空间开关拦建对话与准备一轮但不拦历史与事件、事件序号与子会话游标、交换受众的四道闸、管理接口权限、配额 429 说法与恢复日期、删除解绑、迁移分支幂等 |
 
 ### 10.2 实现决定
 
@@ -367,7 +367,7 @@ git merge upstream/main --no-ff # 跟着上游发版同步
 | 等人提示 | `desktop/src/main/notify.mjs` | `approval/asked`/`question/requested` 且窗口不在前台才叫，同一项不重复；前台看过没处理，走开会再提醒一次 |
 | 胶水接线 | `desktop/src/main/index.mjs`、`preload` | 登录后后台拉起宿主（模型受众令牌随 env + 到期轮换）、`knowwork:start-conversation/send/cancel/decide/answer/delete/set-access/get-access/access-catalog/can-continue/place/pick-folder` 一组桥、通知弹窗与任务栏闪烁 |
 | 扩展前端包 | `extensions/desktop/web/src/` | `chat.sources` 登记「本机」来源（工作文件夹 Picker、三档 Controls、useBlocker、start/actions 全走桥）、`chat.place` 登记设备名提示；`KNOWWORK_WEB_EXTENSIONS` 指到 `extensions/desktop/web/src/index.ts` 即随网页版构建 |
-| 验证 | `desktop/tests/`（38 个用例）+ 真机冒烟 `desktop/scripts/smoke-real-host.mjs` | 托管/客户端/中继/编排/通知全过；真机冒烟用托管模块起真实 DSH 设备宿主 + 官方模拟模型服务（就绪、health、三档预设全在）；带扩展入口的网页版构建通过 |
+| 验证 | `desktop/tests/`（38 个用例，当时口径）+ 真机冒烟 `desktop/scripts/smoke-real-host.mjs` | 托管/客户端/中继/编排/通知全过；真机冒烟用托管模块起真实 DSH 设备宿主 + 官方模拟模型服务（就绪、health、三档预设全在）；带扩展入口的网页版构建通过 |
 
 ### 12.2 实现决定
 
@@ -402,7 +402,7 @@ git merge upstream/main --no-ff # 跟着上游发版同步
 | 桥与前端包 | preload + `deviceSource.tsx` | `filesRead/Pdf/Save/Open/References`（字节走 ipc 结构化拷贝）+ `dropFiles`（preload 里 webUtils 取真实路径）；前端包按 ConversationFiles 合同接上 |
 | 顺手的修复 | `turns.mjs` | M4 遗留：开会话的合同体缺 `cwd`——工作文件夹注册表一起落地，openSession 带 cwd（无记录时报「重新创建对话」） |
 
-测试 +9（folders/files/turns 的 cwd），壳 47/47。
+测试 +9（folders/files/turns 的 cwd），壳 47/47（当时口径）。
 
 ### 13.2 实现决定
 
@@ -440,7 +440,7 @@ git merge upstream/main --no-ff # 跟着上游发版同步
 
 ### 14.3 全里程碑小结
 
-- 桌面壳 56/56（含清单一致性 6、更新 3）、扩展包 13/13、真机冒烟（真实 DSH + 官方模拟模型服务）、
+- 桌面壳 58/58（审查修复后；含清单一致性 7、更新 3）、扩展包 13/13、真机冒烟（真实 DSH + 官方模拟模型服务）、
   带扩展入口的网页版构建、electron-builder --dir 冒烟，全绿。
 - 剩余要真机做的：mac/win 构建机出安装包（CI 就位后一键）、壳内连真实部署的端到端联调（12.3 的
   验收路径）、安装包签名（现在按未签名指引放行）。
