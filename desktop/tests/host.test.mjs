@@ -96,6 +96,25 @@ test('宿主起不来（脚本立即退出）：ready 拒绝并带 stderr', asyn
   }
 })
 
+test('宿主起不来（可执行文件不存在）：ready 给人话报错，不炸未捕获异常', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'kw-host-noent-'))
+  try {
+    const exits = []
+    const process_ = startHostProcess({
+      nodePath: join(dir, '没有这个可执行文件'),
+      dshCli: join(dir, 'stub-dsh.mjs'),
+      home: dir,
+      onExit: (code, signal, stderr) => exits.push({ code, signal, stderr }),
+    })
+    await assert.rejects(process_.ready, /宿主进程无法启动/)
+    assert.deepEqual(await process_.exited, { code: null, signal: null })
+    assert.equal(exits.length, 1)
+    assert.match(exits[0].stderr, /spawn:/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('监督者：崩溃后退避重启，起不来达到上限就放弃', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'kw-sup-'))
   try {

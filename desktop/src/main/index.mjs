@@ -82,7 +82,9 @@ function resolveRuntime() {
     ?? (app.isPackaged ? join(process.resourcesPath, 'runtime-host') : join(app.getAppPath(), '..', 'runtime-host'))
   return {
     runtimeRoot,
-    nodePath: process.env.KNOWWORK_NODE ?? 'node',
+    // 打包态用 PATH 里前置的自带 Node；开发态用 Electron 自己的二进制跑 Node 模式（ELECTRON_RUN_AS_NODE
+    // 在 env 里带，见 startDeviceSide）——机器上的 node 不一定在 Electron 看得见的 PATH 里（Windows 实测 ENOENT）
+    nodePath: process.env.KNOWWORK_NODE ?? (app.isPackaged ? 'node' : process.execPath),
     // dsh 的真实 JS 入口：.bin 里的包装脚本是给 shell 的，node 跑不了
     dshCli: join(runtimeRoot, 'node_modules', '@deepseek-ai', 'dsh', 'lib', 'bin.js'),
     templateDir: join(runtimeRoot, 'profile-device'),
@@ -318,6 +320,8 @@ async function startDeviceSide(origin, userData, tokens, folders) {
         KNOWWORK_MODEL_PROVIDER: 'knowwork-gateway',
         KNOWWORK_MODEL_BASE_URL: `${origin}/api/model/v1`,
         KNOWWORK_MODEL_TOKEN: model.accessToken,
+        // 开发态宿主用 Electron 二进制跑（见 resolveRuntime）：env 里切到 Node 模式
+        ...(app.isPackaged ? {} : { ELECTRON_RUN_AS_NODE: '1' }),
         // 打包态把自带 Node/Python 前置进 PATH：宿主起的 bash 与技能脚本找得到（分隔符按平台）
         ...(app.isPackaged
           ? {

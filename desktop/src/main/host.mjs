@@ -67,7 +67,9 @@ export function startHostProcess({ nodePath, dshCli, home, env = {}, onExit, log
   })
   let stderr = ''
   child.stderr?.on('data', chunk => { stderr += chunk })
+  let resolveExited
   const exited = new Promise(resolve => {
+    resolveExited = resolve
     child.once('exit', (code, signal) => {
       log(`宿主进程退出 code=${code} signal=${signal}`)
       onExit?.(code, signal, stderr)
@@ -77,6 +79,18 @@ export function startHostProcess({ nodePath, dshCli, home, env = {}, onExit, log
   const ready = new Promise((resolve, reject) => {
     let out = ''
     const timer = setTimeout(() => reject(new Error(`宿主 60 秒内未就绪\nstdout:${out}\nstderr:${stderr}`)), 60_000)
+    const fail = error => {
+      clearTimeout(timer)
+      reject(error)
+    }
+    // spawn 失败（ENOENT 等）不触发 exit，error 事件没人接会变成主进程未捕获异常：
+    // 当作一次立即退出上报，ready 落空给出人看得懂的原因
+    child.once('error', error => {
+      log('宿主进程启动失败：', error)
+      onExit?.(null, null, `spawn: ${error.message}`)
+      resolveExited({ code: null, signal: null })
+      fail(new Error(`宿主进程无法启动：${error.message}`))
+    })
     child.stdout?.on('data', chunk => {
       out += chunk
       for (const line of out.split('\n')) {
@@ -90,8 +104,7 @@ export function startHostProcess({ nodePath, dshCli, home, env = {}, onExit, log
       }
     })
     child.once('exit', (code, signal) => {
-      clearTimeout(timer)
-      reject(new Error(`宿主退出 code=${code} signal=${signal}\nstderr:${stderr}`))
+      fail(new Error(`宿主退出 code=${code} signal=${signal}\nstderr:${stderr}`))
     })
   })
   return { child, ready, exited, stop: () => { child.stdin?.end(); child.kill() } }
