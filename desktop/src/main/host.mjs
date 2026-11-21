@@ -10,7 +10,7 @@
 
 import { spawn } from 'node:child_process'
 import { copyFileSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 export const PROFILE_NAME = 'knowwork-device-host'
 const TEMPLATE_FILES = ['package.json', 'cordis.yml', 'cordis.patch.yml', 'pnpm-workspace.yaml']
@@ -38,7 +38,10 @@ export function assembleProfileHome({ templateDir, pluginsDir, home }) {
       } catch {
         // 不存在就直接建
       }
-      symlinkSync(target, link)
+      // Windows 的普通软链要管理员权限或开发者模式（EPERM -4048），目录连接（junction）不用：
+      // junction 只对目录、目标要绝对路径——插件目录正好都满足。junction 的目标用 resolve 规范成
+      // 绝对路径，readlink 读回来与 target 相等，幂等判断不受影响。
+      symlinkSync(resolve(target), link, process.platform === 'win32' ? 'junction' : 'dir')
     }
   }
   return profile
