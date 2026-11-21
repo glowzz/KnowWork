@@ -9,7 +9,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { copyFileSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
 export const PROFILE_NAME = 'knowwork-device-host'
@@ -60,6 +60,10 @@ const unlinkSyncSafe = link => unlinkSync(link)
  */
 export function startHostProcess({ nodePath, dshCli, home, env = {}, onExit, log = () => {} }) {
   if (typeof dshCli !== 'string' || dshCli.length === 0) throw new Error('需要 dshCli（dsh CLI 的路径）')
+  // Windows 的 spawn ENOENT 会误报到可执行文件上（真实原因常是 cwd 或入口不存在）——提前查，给出能动手的原因
+  if (!existsSync(dshCli)) {
+    throw new Error(`宿主入口不存在：${dshCli}\n开发态先在 runtime-host 目录跑一次 npm install`)
+  }
   const child = spawn(nodePath ?? process.execPath, [dshCli, '--profile', PROFILE_NAME], {
     cwd: dirname(dshCli),
     env: { ...process.env, DSH_HOME: home, ...env },
