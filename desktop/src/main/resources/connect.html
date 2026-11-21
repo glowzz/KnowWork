@@ -43,7 +43,7 @@
     show('logging-in');
     const result = await desktop.login();
     if (!result.ok) {
-      document.getElementById('error').textContent = result.message;
+      document.getElementById('error').textContent = result.error?.message ?? result.message ?? '登录失败';
       document.getElementById('error').classList.remove('hidden');
       show('need-server');
     }
@@ -51,7 +51,7 @@
   document.getElementById('go').addEventListener('click', async () => {
     const result = await desktop.connect(document.getElementById('server').value.trim());
     if (!result.ok) {
-      document.getElementById('error').textContent = result.message;
+      document.getElementById('error').textContent = result.error?.message ?? result.message ?? '连接失败';
       document.getElementById('error').classList.remove('hidden');
       return;
     }
