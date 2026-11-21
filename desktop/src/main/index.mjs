@@ -232,6 +232,7 @@ async function applyServer(address, userData) {
   server = origin
   await saveServer(join(userData, 'server.json'), origin)
   ensureUpdater(origin)
+  updater?.setServer(origin)
   sendState({ kind: 'logging-in' })
   try {
     await enter(origin, userData)
@@ -321,7 +322,8 @@ async function startDeviceSide(origin, userData, tokens, folders) {
               PATH: [
                 ...(process.platform === 'darwin'
                   ? [join(process.resourcesPath, 'node', 'bin'), join(process.resourcesPath, 'python', 'bin')]
-                  : [process.resourcesPath + '\\node', process.resourcesPath + '\\python\\Scripts']),
+                  : [process.resourcesPath + '\\node', process.resourcesPath + '\\python',
+                     process.resourcesPath + '\\python\\Scripts']),
                 process.env.PATH ?? '',
               ].join(process.platform === 'win32' ? ';' : ':'),
             }

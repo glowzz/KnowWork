@@ -12,8 +12,9 @@
  *   Contents 归一到 resources/office/Contents——运行时 resolveSoffice 找 office/Contents/MacOS/soffice）
  */
 
-import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createWriteStream } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFile, execFileSync } from 'node:child_process'
@@ -109,10 +110,21 @@ async function stagePython() {
   const requirements = Object.entries(manifest.python.packages)
     .map(([name, version]) => `${name}==${version}`).join('\n')
   writeFileSync(join(DESKTOP, 'requirements-desktop.txt'), requirements + '\n')
-  run('uv', ['python', 'install', manifest.python.version], { stdio: 'inherit' })
-  const managed = execFileSync('uv', ['python', 'find', manifest.python.version], { encoding: 'utf8' }).trim()
-  cpSync(managed, target, { recursive: true })
+  // uv python find 返回的是可执行文件路径，不是安装根——把安装目录定向到临时区，
+  // 再把 cpython 安装根整棵拷进 resources/python（python-build-standalone 可重定位）
+  const stage = mkdtempSync(join(tmpdir(), 'kw-python-'))
+  const installDir = join(stage, 'pyinstall')
+  run('uv', ['python', 'install', manifest.python.version], {
+    stdio: 'inherit',
+    env: { ...process.env, UV_PYTHON_INSTALL_DIR: installDir },
+  })
+  const entries = readdirSync(installDir)
+  const root = entries.find(entry => entry.startsWith('cpython-'))
+  if (root === undefined) throw new Error(`uv 的安装目录里没有 cpython-*：${entries.join(', ')}`)
+  cpSync(join(installDir, root), target, { recursive: true })
   const pythonBin = platform === 'win32' ? join(target, 'python.exe') : join(target, 'bin', 'python3')
+  if (!existsSync(pythonBin)) throw new Error(`拷贝后的解释器不在期望位置：${pythonBin}`)
+  rmSync(stage, { recursive: true, force: true })
   // python-build-standalone 不自带 pip：用 uv 以它为解释器装清单
   run('uv', ['pip', 'install', '--python', pythonBin, '-r', join(DESKTOP, 'requirements-desktop.txt')], { stdio: 'inherit' })
   execFileSync(pythonBin, ['-c', 'import pandas, openpyxl, docx, pptx, matplotlib, markitdown'], { stdio: 'inherit' })

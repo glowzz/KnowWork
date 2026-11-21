@@ -38,6 +38,10 @@ export function createUpdater({ updater, server, log = () => {}, onUpdate = () =
   })
 
   return {
+    /** 服务地址变了（深链重连另一台服务器）：feed 跟着换，别一直指向旧地址。 */
+    setServer(origin) {
+      updater.setFeedURL({ provider: 'generic', url: `${origin}/desktop/` })
+    },
     check() {
       void updater.checkForUpdates().catch(error => log('检查更新失败：', error))
     },
