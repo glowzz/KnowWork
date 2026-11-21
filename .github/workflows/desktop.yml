@@ -77,6 +77,15 @@ jobs:
         # electron-builder 的标准平台参数是 --mac/--win（别用 --darwin/--win32 这种非标准写法）
         run: npx electron-builder ${{ matrix.platform == 'darwin' && '--mac --arm64' || '--win --x64' }}
 
+      # 更新清单缺失 = 自动更新整条线报废：单独上传且缺失即红（electron-builder 只在 publish 配置下产出）
+      - uses: actions/upload-artifact@v4
+        with:
+          name: knowwork-desktop-${{ matrix.platform }}-update-manifests
+          path: |
+            desktop/release/latest.yml
+            desktop/release/latest-mac.yml
+          if-no-files-found: error
+
       - uses: actions/upload-artifact@v4
         with:
           name: knowwork-desktop-${{ matrix.platform }}
@@ -84,6 +93,4 @@ jobs:
             desktop/release/*.dmg
             desktop/release/*.zip
             desktop/release/*.exe
-            desktop/release/latest.yml
-            desktop/release/latest-mac.yml
             desktop/release/*.blockmap

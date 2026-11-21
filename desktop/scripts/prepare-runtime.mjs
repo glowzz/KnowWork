@@ -101,17 +101,22 @@ async function stageNode() {
 }
 
 async function stagePython() {
-  // Python 3.12 + 清单里的包：uv 装 venv（CI 有 astral-sh/setup-uv；开发机装了 uv 即可）
+  // Python 3.12 + 清单里的包。注意不能只装一个 venv：venv 的解释器软链与标准库都留在 uv 的托管目录里，
+  // 拷到用户机器就起不来。做法：uv 装托管解释器（python-build-standalone，可重定位）→ 整棵拷进
+  // resources/python → 用它装清单里的包 → 收尾冒烟真拉起解释器 import 一轮
   const target = join(RESOURCES, 'python')
   rmSync(target, { recursive: true, force: true })
   const requirements = Object.entries(manifest.python.packages)
     .map(([name, version]) => `${name}==${version}`).join('\n')
   writeFileSync(join(DESKTOP, 'requirements-desktop.txt'), requirements + '\n')
   run('uv', ['python', 'install', manifest.python.version], { stdio: 'inherit' })
-  run('uv', ['venv', '--python', manifest.python.version, target], { stdio: 'inherit' })
-  const pythonBin = platform === 'win32' ? join(target, 'Scripts', 'python.exe') : join(target, 'bin', 'python')
+  const managed = execFileSync('uv', ['python', 'find', manifest.python.version], { encoding: 'utf8' }).trim()
+  cpSync(managed, target, { recursive: true })
+  const pythonBin = platform === 'win32' ? join(target, 'python.exe') : join(target, 'bin', 'python3')
+  // python-build-standalone 不自带 pip：用 uv 以它为解释器装清单
   run('uv', ['pip', 'install', '--python', pythonBin, '-r', join(DESKTOP, 'requirements-desktop.txt')], { stdio: 'inherit' })
-  log('Python 就位：', target)
+  execFileSync(pythonBin, ['-c', 'import pandas, openpyxl, docx, pptx, matplotlib, markitdown'], { stdio: 'inherit' })
+  log('Python 就位（含解释器与标准库）：', target)
 }
 
 function stageOffice() {

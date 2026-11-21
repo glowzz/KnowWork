@@ -43,9 +43,10 @@ test('Python 3.12：技能源码用 PEP 701 的 f-string 嵌套引号', () => {
   assert.match(DOCKERFILE, /python:3\.12/)
 })
 
-test('LibreOffice 版本跟沙箱镜像的说明一致', () => {
+test('LibreOffice 钉到 patch 级，且与沙箱镜像的大版本一致（25.2 前缀）', () => {
   const dockerfileVersion = DOCKERFILE.match(/LibreOffice (\d+\.\d+)/)?.[1]
-  assert.equal(MANIFEST.libreoffice, dockerfileVersion)
+  assert.match(MANIFEST.libreoffice, /^\d+\.\d+\.\d+$/, '清单要钉到 patch 级（如 25.2.5）')
+  assert.ok(MANIFEST.libreoffice.startsWith(dockerfileVersion), `清单 ${MANIFEST.libreoffice} 与沙箱镜像的 ${dockerfileVersion} 大版本不一致`)
 })
 
 test('本机宿主的 Node 满足 runtime-host 的 engines（>=24.9.0）', () => {
@@ -54,6 +55,13 @@ test('本机宿主的 Node 满足 runtime-host 的 engines（>=24.9.0）', () =>
   const [needMajor, needMinor] = engines[1].split('.').map(Number)
   assert.ok(major > needMajor || (major === needMajor && minor >= needMinor),
             `桌面自带的 Node ${MANIFEST.node.host} 低于宿主要求的 ${engines[1]}`)
+})
+
+test('CI 的 LibreOffice 下载版本与清单一致（漏改 workflow 会红）', () => {
+  const workflow = readFileSync(join(REPO, '.github', 'workflows', 'desktop.yml'), 'utf8')
+  const workflowVersion = workflow.match(/LO_VERSION: ([\d.]+)/)?.[1]
+  assert.ok(workflowVersion !== undefined, 'workflow 里没找到 LO_VERSION')
+  assert.equal(workflowVersion, MANIFEST.libreoffice)
 })
 
 test('DSH 版本与 runtime-host 锁的同一个', () => {
