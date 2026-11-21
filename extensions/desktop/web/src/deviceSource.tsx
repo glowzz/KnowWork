@@ -1,7 +1,7 @@
 /** 「本机」来源：对话在这台电脑上执行（desktop/src/main 的编排驱动本机宿主），发消息、停止、审批、
  * 回答提问经桥交到这台电脑上；工作文件夹在建对话时选定（发出第一句后就定了），三档访问方式在会话页切。 */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { Select } from '@openai/apps-sdk-ui/components/Select';
 import { Folder } from '@openai/apps-sdk-ui/components/Icon';
 import { DEVICE_SOURCE } from '@knowwork/web/api/conversations';
@@ -41,13 +41,20 @@ function setWorkingFolder(path: string | null): void {
   for (const listener of folderListeners) listener();
 }
 
+/** 订阅文件夹变更：useBlocker 也是 hook（外层按 hook 规矩调用），不订阅的话选完文件夹输入框还是旧的灰。 */
+function useWorkingFolder(): string | null {
+  return useSyncExternalStore(
+    (listener) => {
+      folderListeners.add(listener);
+      return () => folderListeners.delete(listener);
+    },
+    () => workingFolder,
+    () => null,
+  );
+}
+
 function FolderPicker(): React.ReactNode {
-  const [, bump] = useState(0);
-  useEffect(() => {
-    const listener = () => bump((value) => value + 1);
-    folderListeners.add(listener);
-    return () => folderListeners.delete(listener);
-  }, []);
+  const folder = useWorkingFolder();
   return (
     <div role="group" aria-label="工作文件夹" className="kw-place flex items-center">
       <Select
@@ -58,10 +65,10 @@ function FolderPicker(): React.ReactNode {
         align="start"
         listWidth={320}
         TriggerStartIcon={Folder}
-        value={workingFolder ?? ''}
+        value={folder ?? ''}
         options={[
-          ...(workingFolder === null ? [] : [{ value: workingFolder, label: workingFolder.split(/[\\/]/).at(-1) ?? workingFolder }]),
-          { value: '__pick__', label: workingFolder === null ? FOLDER_TIP : '换一个文件夹' },
+          ...(folder === null ? [] : [{ value: folder, label: folder.split(/[\\/]/).at(-1) ?? folder }]),
+          { value: '__pick__', label: folder === null ? FOLDER_TIP : '换一个文件夹' },
         ]}
         onChange={(option) => {
           if (option.value === '__pick__') void unwrap(bridge().pickFolder()).then((result) => setWorkingFolder(result.path ?? null));
@@ -149,7 +156,11 @@ export function deviceSource(): ConversationSource {
     Controls: AccessControl,
     welcome: '在这台电脑上干活',
     footnote: '智能体在这台电脑上执行：读写工作文件夹、跑本机程序；账号、权限与对话记录仍在服务端',
-    useBlocker: () => (bridgeAvailable() ? (workingFolder === null ? '先选一个工作文件夹（旁边那个）' : null) : '本机对话要在 KnowWork 桌面端里开'),
+    useBlocker: () => {
+      const folder = useWorkingFolder();
+      if (!bridgeAvailable()) return '本机对话要在 KnowWork 桌面端里开';
+      return folder === null ? '先选一个工作文件夹（旁边那个）' : null;
+    },
     start: async (input) => {
       const workspaceId = useWorkspaceStore.getState().id;
       if (workspaceId === null) throw new ApiError(0, '先在网页版里选择工作空间');
