@@ -5,6 +5,11 @@ appId: com.knowwork.desktop
 productName: KnowWork 桌面端
 directories:
   output: release
+# 更新清单（latest*.yml）只有配置了 publish 才会产出；feed 的真实地址运行时 setFeedURL 覆盖
+# （网关的 /desktop/，desktop/src/main/update.mjs），这里的占位只是让构建把清单生成出来
+publish:
+  provider: generic
+  url: https://knowwork.invalid/desktop/
 files:
   - src/**/*
   - package.json

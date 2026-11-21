@@ -56,14 +56,17 @@ function extractStrip(archive, destination) {
   execFileSync('tar', ['-xzf', archive, '-C', destination, '--strip-components=1'], { stdio: 'inherit' })
 }
 
-/** Windows 的 npm 是 .cmd（spawn 不自动补）；uv 是 uv.exe（setup-uv 装的可执行）。类 Unix 直接用。 */
+/** Windows：npm 是 .cmd（Node 18+ 的 execFileSync 直跑 .cmd 会 EINVAL，必须 shell）；uv 是 uv.exe 直跑。 */
 function run(command, args, options = {}) {
   if (platform === 'win32') {
-    const executable = command === 'npm' ? 'npm.cmd' : `${command}.exe`
-    execFileSync(executable, args, { stdio: 'inherit', ...options })
-  } else {
-    execFileSync(command, args, { stdio: 'inherit', ...options })
+    if (command === 'npm') {
+      execFileSync('npm.cmd', args, { stdio: 'inherit', shell: true, ...options })
+      return
+    }
+    execFileSync(`${command}.exe`, args, { stdio: 'inherit', ...options })
+    return
   }
+  execFileSync(command, args, { stdio: 'inherit', ...options })
 }
 
 function stageRuntimeHost() {
@@ -115,8 +118,8 @@ function stageOffice() {
   const officeDir = process.env.KNOWWORK_OFFICE_DIR
   const target = join(RESOURCES, 'office')
   if (officeDir === undefined || !existsSync(officeDir)) {
-    log('office：没有 KNOWWORK_OFFICE_DIR，先跳过（CI 里装好 LibreOffice 25.2 后指向它）')
-    return
+    // 静默跳过会打包出没有 Office 引擎的产物（预览/转换真机全废）：宁可让打包直接失败
+    throw new Error('office：KNOWWORK_OFFICE_DIR 没有设置或不存在（CI 里先装 LibreOffice 25.2 再跑本脚本）')
   }
   rmSync(target, { recursive: true, force: true })
   // mac 的形态是 LibreOffice.app：把 Contents 归一到 resources/office/Contents

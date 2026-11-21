@@ -40,7 +40,7 @@ jobs:
       - if: matrix.platform == 'darwin'
         name: Download LibreOffice 25.2.5 (mac)
         run: |
-          curl -L -o /tmp/libreoffice.dmg "https://download.documentfoundation.org/libreoffice/old/${LO_VERSION}/mac/arm64/LibreOffice_${LO_VERSION}_MacOS_arm64.dmg"
+          curl -fL -o /tmp/libreoffice.dmg "https://download.documentfoundation.org/libreoffice/old/${LO_VERSION}/mac/arm64/LibreOffice_${LO_VERSION}_MacOS_arm64.dmg"
           hdiutil attach -nobrowse /tmp/libreoffice.dmg
           mkdir -p ./lo
           cp -R "/Volumes/LibreOffice/LibreOffice.app" ./lo/LibreOffice.app
@@ -49,7 +49,7 @@ jobs:
         name: Download and install LibreOffice 25.2.5 (win)
         shell: pwsh
         run: |
-          curl -L -o "$env:RUNNER_TEMP\libreoffice.msi" "https://download.documentfoundation.org/libreoffice/old/${env:LO_VERSION}/win/x86_64/LibreOffice_${env:LO_VERSION}_Win_x86-64.msi"
+          curl -fL -o "$env:RUNNER_TEMP\libreoffice.msi" "https://download.documentfoundation.org/libreoffice/old/${env:LO_VERSION}/win/x86_64/LibreOffice_${env:LO_VERSION}_Win_x86-64.msi"
           Start-Process msiexec -ArgumentList '/i', "$env:RUNNER_TEMP\libreoffice.msi", '/qn', '/norestart' -Wait
 
       # 桌面壳（含 electron 与 electron-updater）
@@ -70,7 +70,7 @@ jobs:
         env:
           # LibreOffice 的安装位置：mac 是 /Applications（里面有 LibreOffice.app），Windows 是安装根
           # （里面有 program/soffice.exe）；prepare-runtime 归一到 resources/office/
-          KNOWWORK_OFFICE_DIR: ${{ matrix.platform == 'darwin' && format('{0}/lo', github.workspace) || 'C:\\Program Files\\LibreOffice' }}
+          KNOWWORK_OFFICE_DIR: ${{ matrix.platform == 'darwin' && format('{0}/lo', github.workspace) || 'C:\Program Files\LibreOffice' }}
 
       - name: Build
         working-directory: desktop

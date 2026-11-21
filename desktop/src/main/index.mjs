@@ -269,7 +269,6 @@ async function enter(origin, userData, { forceLogin = false } = {}) {
   sendState({ kind: 'ready' })
   await window.loadURL(origin)
   ensureUpdater(origin)
-  updater.check()
   void startDeviceSide(origin, userData, tokens, folders).catch(error => log('本机宿主启动失败：', error))
 }
 
