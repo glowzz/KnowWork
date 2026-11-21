@@ -268,6 +268,8 @@ async function enter(origin, userData, { forceLogin = false } = {}) {
   server = origin
   sendState({ kind: 'ready' })
   await window.loadURL(origin)
+  ensureUpdater(origin)
+  updater.check()
   void startDeviceSide(origin, userData, tokens, folders).catch(error => log('本机宿主启动失败：', error))
 }
 
@@ -314,9 +316,16 @@ async function startDeviceSide(origin, userData, tokens, folders) {
         KNOWWORK_MODEL_PROVIDER: 'knowwork-gateway',
         KNOWWORK_MODEL_BASE_URL: `${origin}/api/model/v1`,
         KNOWWORK_MODEL_TOKEN: model.accessToken,
-        // 打包态把自带 Node/Python 前置进 PATH：宿主起的 bash 与技能脚本找得到
+        // 打包态把自带 Node/Python 前置进 PATH：宿主起的 bash 与技能脚本找得到（分隔符按平台）
         ...(app.isPackaged
-          ? { PATH: `${join(process.resourcesPath, 'node')}:${join(process.resourcesPath, 'python', 'bin')}:${process.env.PATH ?? ''}` }
+          ? {
+              PATH: [
+                ...(process.platform === 'darwin'
+                  ? [join(process.resourcesPath, 'node', 'bin'), join(process.resourcesPath, 'python', 'bin')]
+                  : [process.resourcesPath + '\\node', process.resourcesPath + '\\python\\Scripts']),
+                process.env.PATH ?? '',
+              ].join(process.platform === 'win32' ? ';' : ':'),
+            }
           : {}),
       },
       onExit: () => conversations?.hostRestarted(),
@@ -353,6 +362,7 @@ let updater = null
 function ensureUpdater(origin) {
   if (updater !== null) return
   updater = createUpdater({
+    updater: autoUpdater,
     server: origin,
     log,
     onUpdate: state => {

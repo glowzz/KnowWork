@@ -30,7 +30,7 @@ if (installers.length === 0) {
 }
 
 mkdirSync(OUT, { recursive: true })
-const manifest = { version, files: [] }
+const manifest = { version: VERSION, files: [] }
 for (const name of installers) {
   const bytes = readFileSync(join(RELEASE, name))
   copyFileSync(join(RELEASE, name), join(OUT, name))

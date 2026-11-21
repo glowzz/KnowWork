@@ -16,6 +16,8 @@ jobs:
           - os: windows-latest
             platform: win32
     runs-on: ${{ matrix.os }}
+    env:
+      LO_VERSION: 25.2.5
     steps:
       - uses: actions/checkout@v4
 
@@ -33,12 +35,22 @@ jobs:
         with:
           python-version: '3.12'
 
-      # 自带的 LibreOffice：mac 装 cask（/Applications/LibreOffice.app），Windows 装 fresh
-      # （C:\Program Files\LibreOffice）；prepare-runtime 按平台归一到 resources/office/
+      # 自带的 LibreOffice：钉 25.2.5，官方归档下载（mac 挂载 dmg 拷出 .app；Windows msi 静默装，
+      # runner 是管理员）。浮动最新版会破坏「与沙箱镜像同版本」的保证
       - if: matrix.platform == 'darwin'
-        run: brew install --cask libreoffice
+        name: Download LibreOffice 25.2.5 (mac)
+        run: |
+          curl -L -o /tmp/libreoffice.dmg "https://download.documentfoundation.org/libreoffice/old/${LO_VERSION}/mac/arm64/LibreOffice_${LO_VERSION}_MacOS_arm64.dmg"
+          hdiutil attach -nobrowse /tmp/libreoffice.dmg
+          mkdir -p ./lo
+          cp -R "/Volumes/LibreOffice/LibreOffice.app" ./lo/LibreOffice.app
+          hdiutil detach "/Volumes/LibreOffice" -force
       - if: matrix.platform == 'win32'
-        run: choco install libreoffice-fresh -y --no-progress
+        name: Download and install LibreOffice 25.2.5 (win)
+        shell: pwsh
+        run: |
+          curl -L -o "$env:RUNNER_TEMP\libreoffice.msi" "https://download.documentfoundation.org/libreoffice/old/${env:LO_VERSION}/win/x86_64/LibreOffice_${env:LO_VERSION}_Win_x86-64.msi"
+          Start-Process msiexec -ArgumentList '/i', "$env:RUNNER_TEMP\libreoffice.msi", '/qn', '/norestart' -Wait
 
       # 桌面壳（含 electron 与 electron-updater）
       - name: Install desktop dependencies
@@ -58,7 +70,7 @@ jobs:
         env:
           # LibreOffice 的安装位置：mac 是 /Applications（里面有 LibreOffice.app），Windows 是安装根
           # （里面有 program/soffice.exe）；prepare-runtime 归一到 resources/office/
-          KNOWWORK_OFFICE_DIR: ${{ matrix.platform == 'darwin' && '/Applications' || 'C:\Program Files\LibreOffice' }}
+          KNOWWORK_OFFICE_DIR: ${{ matrix.platform == 'darwin' && format('{0}/lo', github.workspace) || 'C:\\Program Files\\LibreOffice' }}
 
       - name: Build
         working-directory: desktop

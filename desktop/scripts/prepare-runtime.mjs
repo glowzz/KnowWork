@@ -45,18 +45,22 @@ async function download(url, destination) {
   return destination
 }
 
-/** 官方发行包解压：内容上移一层（不留 node-vX 的顶层目录）；两个平台都用系统 tar（Windows 10+ 自带 bsdtar，吃 zip）。 */
+/** 官方发行包解压：内容上移一层（不留 node-vX 的顶层目录）。Windows 用 System32 的 bsdtar
+ * （绝对路径，避开 Git Bash 里 GNU tar 不吃 zip 的坑；它支持 --strip-components 且能解 zip）。 */
 function extractStrip(archive, destination) {
-  const args = platform === 'darwin'
-    ? ['-xzf', archive, '-C', destination, '--strip-components=1']
-    : ['-xf', archive, '-C', destination, '--strip-components=1']
-  execFileSync('tar', args, { stdio: 'inherit' })
+  if (platform === 'win32') {
+    const bsdtar = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'tar.exe')
+    execFileSync(bsdtar, ['-xf', archive, '-C', destination, '--strip-components=1'], { stdio: 'inherit' })
+    return
+  }
+  execFileSync('tar', ['-xzf', archive, '-C', destination, '--strip-components=1'], { stdio: 'inherit' })
 }
 
-/** Windows 的 npm 是 .cmd（spawn 不自动补），统一走 shell；类 Unix 直接 execFileSync。 */
+/** Windows 的 npm 是 .cmd（spawn 不自动补）；uv 是 uv.exe（setup-uv 装的可执行）。类 Unix 直接用。 */
 function run(command, args, options = {}) {
   if (platform === 'win32') {
-    execFileSync(`${command}.cmd`, args, { stdio: 'inherit', shell: false, ...options })
+    const executable = command === 'npm' ? 'npm.cmd' : `${command}.exe`
+    execFileSync(executable, args, { stdio: 'inherit', ...options })
   } else {
     execFileSync(command, args, { stdio: 'inherit', ...options })
   }
@@ -123,7 +127,14 @@ function stageOffice() {
   } else {
     cpSync(officeDir, target, { recursive: true })
   }
-  log('LibreOffice 就位：', target)
+  // 备齐后断言可执行真的在（布局与 resolveSoffice 的期望一致；不对齐就地报错，别静默出货）
+  const executable = platform === 'darwin'
+    ? join(target, 'Contents', 'MacOS', 'soffice')
+    : join(target, 'program', platform === 'win32' ? 'soffice.exe' : 'soffice')
+  if (!existsSync(executable)) {
+    throw new Error(`LibreOffice 的可执行没到位（期望 ${executable}）；检查 KNOWWORK_OFFICE_DIR 的形态`)
+  }
+  log('LibreOffice 就位：', executable)
 }
 
 mkdirSync(RESOURCES, { recursive: true })
