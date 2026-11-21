@@ -36,6 +36,14 @@ function log(...parts) {
   console.log('[prepare]', ...parts)
 }
 
+/** uv 托管 Python 的安装根（linux/macOS：~/.local/share/uv/python；Windows：%APPDATA%\\uv\\python）。 */
+function uvPythonDir() {
+  const appData = process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming')
+  return platform === 'win32'
+    ? join(appData, 'uv', 'python')
+    : join(process.env.XDG_DATA_HOME ?? join(homedir(), '.local', 'share'), 'uv', 'python')
+}
+
 async function download(url, destination) {
   log('下载：', url)
   const response = await fetch(url, { redirect: 'follow' })
@@ -109,11 +117,17 @@ async function stagePython() {
   const requirements = Object.entries(manifest.python.packages)
     .map(([name, version]) => `${name}==${version}`).join('\n')
   writeFileSync(join(DESKTOP, 'requirements-desktop.txt'), requirements + '\n')
-  // CI 的 setup-uv 已把 3.12 装进 uv 的托管目录：uv python find 返回可执行文件路径，
-  // 反推安装根（darwin 是 bin/python3 的上两级；win 是 python.exe 的上一级）整树拷进
-  // resources/python（python-build-standalone 可重定位，含解释器与标准库）
-  const managed = execFileSync('uv', ['python', 'find', manifest.python.version], { encoding: 'utf8' }).trim()
+  // CI 的 setup-uv 已把 3.12 装进 uv 的托管目录：--managed-python 强制只取托管 standalone
+  // （否则 PATH 上的系统 python 会抢先，反推出的「安装根」就是 /usr 之类的错误目录）。
+  // uv python find 返回可执行文件路径，反推安装根（darwin 是 bin/python3 的上两级；
+  // win 是 python.exe 的上一级）整树拷进 resources/python——python-build-standalone 可重定位
+  const managed = execFileSync('uv', ['python', 'find', '--managed-python', manifest.python.version],
+                               { encoding: 'utf8' }).trim()
   const installRoot = platform === 'darwin' ? join(managed, '..', '..') : dirname(managed)
+  if (!join(installRoot, 'bin').startsWith(join(uvPythonDir()))) {
+    // find 到的必须是 uv 托管目录里的 standalone：系统 python 不可重定位，拷出去起不来
+    throw new Error(`uv python find 返回的不是托管解释器：${managed}（期望在 ${uvPythonDir()} 下）`)
+  }
   cpSync(installRoot, target, { recursive: true })
   const pythonBin = platform === 'win32' ? join(target, 'python.exe') : join(target, 'bin', 'python3')
   if (!existsSync(pythonBin)) throw new Error(`拷贝后的解释器不在期望位置：${pythonBin}`)

@@ -14,6 +14,7 @@ export function createUpdater({ updater, server, log = () => {}, onUpdate = () =
   const listeners = new Set([onUpdate])
   let downloading = false
   let downloaded = false
+  let downloadEpoch = 0  // setServer 换 feed 时自增：旧 feed 的在途下载完成后不再置「已下载」
 
   updater.on('update-available', info => {
     log('发现新版桌面端：', info?.version)
@@ -26,9 +27,11 @@ export function createUpdater({ updater, server, log = () => {}, onUpdate = () =
     for (const listener of listeners) listener({ kind: 'progress', percent: Math.round(progress?.percent ?? 0) })
   })
   updater.on('update-downloaded', info => {
+    const stale = downloadEpoch
     downloaded = true
     downloading = false
-    log('新版下载完成，退出时安装：', info?.version)
+    log('新版下载完成，退出时安装：', info?.version, stale === downloadEpoch ? '' : '（旧服务器的在途下载，已过时忽略）')
+    if (stale !== downloadEpoch) return  // 旧 feed 的在途下载：feed 已换，装了就是跨服务器误装
     for (const listener of listeners) listener({ kind: 'downloaded', version: info?.version })
   })
   updater.on('error', error => {
@@ -38,13 +41,12 @@ export function createUpdater({ updater, server, log = () => {}, onUpdate = () =
   })
 
   return {
-    /** 服务地址变了（深链重连另一台服务器）：feed 跟着换，并清掉旧服务器的下载状态——
-     * electron-updater 的「已下载待装」内部清不掉（autoInstallOnAppQuit 仍会装旧的），
-     * 所以这里同时重置本层标记，让 download() 可以从新 feed 重新取；旧包残余由
-     * electron-updater 自己的下一次下载覆盖，跨服务器误装的残余风险记录在此。 */
+    /** 服务地址变了（深链重连另一台服务器）：feed 跟着换、下载标记清零、代次自增——
+     * 旧 feed 的在途下载完成后不会把「已下载」状态带回来（跨服务器误装的窗口被代次挡住）。 */
     setServer(origin) {
       downloading = false
       downloaded = false
+      downloadEpoch += 1
       updater.setFeedURL({ provider: 'generic', url: `${origin}/desktop/` })
     },
     check() {
