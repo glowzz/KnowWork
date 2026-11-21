@@ -8,12 +8,15 @@
  * 崩溃后按退避重启（上限内）；就绪行、健康检查、令牌随 env 带（KNOWWORK_HOST_TOKEN 等，见 index.mjs 的装配）。
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, readlinkSync, symlinkSync, unlinkSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
 export const PROFILE_NAME = 'knowwork-device-host'
 const TEMPLATE_FILES = ['package.json', 'cordis.yml', 'cordis.patch.yml', 'pnpm-workspace.yaml']
+// 与 runtime-host/package.json 的 engines、desktop/resources-manifest.json 的 node.host 同一口径：
+// dsh CLI 用 import.meta.main 判定入口（Node 22.13/24 起才有），更低的 Node 会什么都不做、安静退出
+const MIN_HOST_NODE = { major: 24, minor: 9 }
 
 /** 组装 DSH_HOME（幂等）：已有配置档就不重做；软链损坏（目标换了）时重建。 */
 export function assembleProfileHome({ templateDir, pluginsDir, home }) {
@@ -54,6 +57,30 @@ const readlinkTarget = link => {
 }
 const unlinkSyncSafe = link => unlinkSync(link)
 
+/** 起宿主前核对 Node 版本：太低时 dsh CLI 会静默退出（见 MIN_HOST_NODE），必须提前说人话。探不出来就不拦，让原路径报。 */
+function checkNodeVersion(nodePath, log) {
+  let result
+  try {
+    result = spawnSync(nodePath ?? process.execPath, ['-p', 'process.versions.node'], { timeout: 5000 })
+  } catch {
+    return
+  }
+  const version = result.stdout?.toString().trim()
+  const match = /^v?(\d+)\.(\d+)/.exec(version ?? '')
+  if (!match) {
+    log(`宿主 Node 版本没探出来（${nodePath ?? process.execPath}），继续启动`)
+    return
+  }
+  const [major, minor] = [Number(match[1]), Number(match[2])]
+  log(`宿主 Node：v${major}.${minor}.x（${nodePath ?? process.execPath}）`)
+  if (major < MIN_HOST_NODE.major || (major === MIN_HOST_NODE.major && minor < MIN_HOST_NODE.minor)) {
+    throw new Error(
+      `宿主的 Node 太旧：v${version}（要 >=${MIN_HOST_NODE.major}.${MIN_HOST_NODE.minor}）。\n` +
+      'dsh CLI 靠 import.meta.main 判定入口（Node 22.13/24 起才有），旧 Node 会什么都不做、安静退出。\n' +
+      '升级机器上的 Node 到 24 LTS，或设 KNOWWORK_NODE 指到新 Node 再启动桌面端。')
+  }
+}
+
 /**
  * 起宿主进程：等就绪行（{knowworkHostReady:true, port}）才算起来；进程退出触发 onExit（上层决定重启）。
  * env 里带 DSH_HOME、KNOWWORK_HOST_TOKEN/PORT、模型网关地址与令牌（desktop 的 config.mjs 与 index.mjs 装配）。
@@ -64,6 +91,7 @@ export function startHostProcess({ nodePath, dshCli, home, env = {}, onExit, log
   if (!existsSync(dshCli)) {
     throw new Error(`宿主入口不存在：${dshCli}\n开发态先在 runtime-host 目录跑一次 npm install`)
   }
+  checkNodeVersion(nodePath, log)
   const child = spawn(nodePath ?? process.execPath, [dshCli, '--profile', PROFILE_NAME], {
     cwd: dirname(dshCli),
     env: { ...process.env, DSH_HOME: home, ...env },
@@ -108,7 +136,7 @@ export function startHostProcess({ nodePath, dshCli, home, env = {}, onExit, log
       }
     })
     child.once('exit', (code, signal) => {
-      fail(new Error(`宿主退出 code=${code} signal=${signal}\nstderr:${stderr}`))
+      fail(new Error(`宿主退出 code=${code} signal=${signal}\nstderr:${stderr || '（空）'}\nstdout 末尾：${out.slice(-1500) || '（空）'}`))
     })
   })
   return { child, ready, exited, stop: () => { child.stdin?.end(); child.kill() } }

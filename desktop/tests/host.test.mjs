@@ -2,7 +2,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readlinkSync, existsSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readlinkSync, existsSync, chmodSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { assembleProfileHome, startHostProcess, superviseHost } from '../src/main/host.mjs'
@@ -122,6 +122,23 @@ test('宿主入口不存在：同步给出能动手的原因（Windows 的 spawn
     assert.throws(
       () => startHostProcess({ nodePath: process.execPath, dshCli: join(dir, '没有.mjs'), home: dir }),
       /宿主入口不存在[\s\S]*npm install/,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('宿主 Node 太旧：起宿主前就拦下说人话（dsh CLI 在旧 Node 上会静默退出）', () => {
+  if (process.platform === 'win32') return  // 假 node 是 sh 脚本，Windows 跑不了
+  const dir = mkdtempSync(join(tmpdir(), 'kw-host-oldnode-'))
+  try {
+    const fakeNode = join(dir, 'fake-node')
+    writeFileSync(fakeNode, '#!/bin/sh\necho v22.12.0\n')
+    chmodSync(fakeNode, 0o755)
+    writeFileSync(join(dir, 'stub-dsh.mjs'), '')  // 先过入口存在检查
+    assert.throws(
+      () => startHostProcess({ nodePath: fakeNode, dshCli: join(dir, 'stub-dsh.mjs'), home: dir }),
+      /Node 太旧[\s\S]*KNOWWORK_NODE/,
     )
   } finally {
     rmSync(dir, { recursive: true, force: true })
